@@ -23,6 +23,7 @@
     ],
     "notifications": {
       "enabled": true,
+      "onShown": false,
       "onBlocked": true,
       "onModified": true,
       "onAllowed": false,

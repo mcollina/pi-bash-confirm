@@ -54,6 +54,7 @@ To enable Telegram notifications for blocked and modified commands:
   "bashConfirm": {
     "notifications": {
       "enabled": true,
+      "onShown": false,
       "onBlocked": true,
       "onModified": true,
       "onAllowed": false,
@@ -110,6 +111,7 @@ View your current configuration:
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `notifications.enabled` | boolean | `false` | Enable notification system |
+| `notifications.onShown` | boolean | `false` | Send notifications when confirmation dialog is displayed |
 | `notifications.onBlocked` | boolean | `true` | Send notifications for blocked commands |
 | `notifications.onModified` | boolean | `true` | Send notifications for modified commands |
 | `notifications.onAllowed` | boolean | `false` | Send notifications for allowed commands |
@@ -252,6 +254,20 @@ When a bash command is intercepted, you'll see:
 - **Block** (or ESC): Cancel the command execution
 
 ## Notification Examples
+
+### Dialog Shown Notification
+
+```
+⏳ Command Confirmation Requested
+
+Session: abc12345
+Directory: /home/user/project
+
+Command
+ls -la /home/user/project
+
+2026-01-26T16:51:49.123Z
+```
 
 ### Blocked Command Notification
 

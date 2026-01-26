@@ -6,6 +6,7 @@ The pi-bash-confirm package includes a comprehensive notification system that ca
 
 Notifications are sent for the following events:
 
+- **Dialog Shown** (optional): When the confirmation dialog is displayed (disabled by default to avoid noise)
 - **Blocked Commands**: When a command is blocked by pattern matching or user rejection
 - **Modified Commands**: When a user edits a command via the Edit option in the confirmation dialog
 - **Allowed Commands** (optional): When a command is allowed (disabled by default to avoid noise)
@@ -33,6 +34,7 @@ Control which events trigger notifications:
   "bashConfirm": {
     "notifications": {
       "enabled": true,
+      "onShown": false,     // Send notifications when dialog is shown
       "onBlocked": true,    // Send notifications for blocked commands
       "onModified": true,   // Send notifications for modified commands
       "onAllowed": false    // Send notifications for allowed commands (noisy!)
@@ -81,6 +83,20 @@ Telegram settings can also be configured via environment variables:
 **Priority:** Settings file values > Environment variables
 
 ## Notification Formats
+
+### Dialog Shown
+
+```
+⏳ Command Confirmation Requested
+
+Session: abc12345
+Directory: /home/user/project
+
+Command
+ls -la /home/user/project
+
+2026-01-26T16:51:49.123Z
+```
 
 ### Blocked Command
 
@@ -204,7 +220,7 @@ View current notification configuration:
 Output includes:
 - Notification enabled status
 - Telegram enabled status
-- Event type settings (onBlocked, onModified, onAllowed)
+- Event type settings (onShown, onBlocked, onModified, onAllowed)
 - Token and chat ID status (configured/missing)
 - Settings file paths
 
