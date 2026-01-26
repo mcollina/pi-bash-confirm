@@ -1,0 +1,38 @@
+{
+  "bashConfirm": {
+    "enabled": true,
+    "safeCommands": [
+      "^ls",
+      "^pwd",
+      "^git (status|log|diff|branch|show)",
+      "^cat .+\\.(md|txt|json|yaml|yml)$",
+      "^echo",
+      "^head",
+      "^tail",
+      "^grep"
+    ],
+    "blockedCommands": [
+      "rm -rf",
+      "sudo .* rm",
+      ":>.*",
+      "^dd if=",
+      "mkfs\\.",
+      "> /dev/sda",
+      "chmod -R 777",
+      "chown -R"
+    ],
+    "notifications": {
+      "enabled": true,
+      "onBlocked": true,
+      "onModified": true,
+      "onAllowed": false,
+      "telegram": {
+        "enabled": true,
+        "token": "YOUR_BOT_TOKEN",
+        "chatId": "YOUR_CHAT_ID",
+        "timeoutMs": 5000,
+        "forceIpv4": true
+      }
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "name": "pi-bash-confirm",
+  "version": "1.0.0",
+  "description": "Pi package for confirming bash commands before execution with Telegram notifications",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "bash",
+    "confirmation",
+    "security",
+    "telegram",
+    "notifications"
+  ],
+  "main": "./extensions/bash-confirm.ts",
+  "pi": {
+    "extensions": ["./extensions/bash-confirm.ts"]
+  },
+  "files": [
+    "extensions/",
+    "docs/",
+    "examples/",
+    "README.md",
+    "LICENSE"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/pi-bash-confirm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/pi-bash-confirm/issues"
+  },
+  "homepage": "https://github.com/yourusername/pi-bash-confirm#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": ">=0.50.0"
+  }
+}
