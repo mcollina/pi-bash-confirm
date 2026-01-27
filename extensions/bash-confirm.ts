@@ -476,6 +476,17 @@ async function sendModifiedNotification(
   }
 }
 
+async function blockAndStop(
+  ctx: ExtensionContext,
+  command: string,
+  reason: string,
+  pi: ExtensionAPI
+): Promise<{ block: true; reason: string }> {
+  await sendBlockedNotification(ctx, command, reason, pi);
+  ctx.shutdown();
+  return { block: true, reason };
+}
+
 export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName !== "bash") return undefined;
@@ -494,8 +505,7 @@ export default function (pi: ExtensionAPI) {
     // Check blocked commands
     if (config.blockedCommands?.some(pattern => new RegExp(pattern).test(command))) {
       const reason = "Command matches blocked pattern";
-      await sendBlockedNotification(ctx, command, reason, pi);
-      return { block: true, reason };
+      return await blockAndStop(ctx, command, reason, pi);
     }
 
     // Check whitelist (always allow)
@@ -512,8 +522,7 @@ export default function (pi: ExtensionAPI) {
     // No UI available - block for safety
     if (!ctx.hasUI) {
       const reason = "Confirmation required (no UI available)";
-      await sendBlockedNotification(ctx, command, reason, pi);
-      return { block: true, reason };
+      return await blockAndStop(ctx, command, reason, pi);
     }
 
     // Send notification that dialog is being shown
@@ -612,22 +621,19 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify("Added to whitelist: " + command, "success");
         return undefined; // Execute normally
       case "block":
-        const blockReason = "Blocked by user";
-        await sendBlockedNotification(ctx, command, blockReason, pi);
-        return { block: true, reason: blockReason };
+        return await blockAndStop(ctx, command, "Blocked by user", pi);
       case "edit":
         // Open editor for modification
         const edited = await ctx.ui.editor("Edit command:", command);
         if (!edited) {
-          await sendBlockedNotification(ctx, command, "Edit cancelled", pi);
-          return { block: true, reason: "Edit cancelled" };
+          return await blockAndStop(ctx, command, "Edit cancelled", pi);
         }
         await sendModifiedNotification(ctx, command, edited, pi);
         // Update command and allow execution
         event.input.command = edited;
         return undefined;
       default:
-        return { block: true, reason: "No selection" };
+        return await blockAndStop(ctx, command, "No selection", pi);
     }
   });
 
