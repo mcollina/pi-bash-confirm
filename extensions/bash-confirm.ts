@@ -498,6 +498,12 @@ export default function (pi: ExtensionAPI) {
       return { block: true, reason };
     }
 
+    // Check whitelist (always allow)
+    const whitelist = loadWhitelist(ctx.cwd);
+    if (whitelist.entries.some(entry => entry.command === command)) {
+      return undefined;
+    }
+
     // Check safe commands
     if (config.safeCommands?.some(pattern => new RegExp(pattern).test(command))) {
       return undefined; // Allow without confirmation
