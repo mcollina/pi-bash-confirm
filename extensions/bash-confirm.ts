@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Box, Container, Text, type SelectItem } from "@mariozechner/pi-tui";
+import { wrapTextWithAnsi } from "@mariozechner/pi-tui";
 import https from "node:https";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdirSync } from "node:fs";
@@ -573,10 +573,14 @@ export default function (pi: ExtensionAPI) {
         // Header
         lines.push(theme.fg("warning", theme.bold("⚠️  Bash Command Confirmation")));
 
-        // Command display box
+        // Command display (wrapped to full width)
         lines.push("");
-        const cmdLine = `Command: ${command}`;
-        lines.push(cmdLine);
+        lines.push("Command:");
+        const commandWidth = Math.max(10, width - 4);
+        const commandLines = wrapTextWithAnsi(command, commandWidth);
+        for (const line of commandLines) {
+          lines.push(`  ${line}`);
+        }
         lines.push("");
 
         // Working directory
@@ -609,7 +613,7 @@ export default function (pi: ExtensionAPI) {
         invalidate: () => {},
         handleInput,
       };
-    }, { overlay: true, overlayOptions: { anchor: "center", width: 70, minHeight: 12 } });
+    }, { overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "90%", margin: 1 } });
 
     // Handle user choice
     switch (result) {
