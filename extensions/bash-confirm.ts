@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { wrapTextWithAnsi } from "@mariozechner/pi-tui";
 import https from "node:https";
+import { splitCommand } from "./command-splitter.ts";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
@@ -166,15 +167,17 @@ function saveWhitelist(cwd: string, whitelist: WhitelistData): void {
 }
 
 function addToWhitelist(cwd: string, command: string, note?: string): void {
+  const trimmed = command.trim();
+  if (!trimmed) return;
   const whitelist = loadWhitelist(cwd);
 
   // Check if already whitelisted
-  if (whitelist.entries.some(entry => entry.command === command)) {
+  if (whitelist.entries.some(entry => entry.command.trim() === trimmed)) {
     return;
   }
 
   whitelist.entries.push({
-    command,
+    command: trimmed,
     addedAt: new Date().toISOString(),
     note,
   });
@@ -183,8 +186,9 @@ function addToWhitelist(cwd: string, command: string, note?: string): void {
 }
 
 function removeFromWhitelist(cwd: string, command: string): boolean {
+  const trimmed = command.trim();
   const whitelist = loadWhitelist(cwd);
-  const index = whitelist.entries.findIndex(entry => entry.command === command);
+  const index = whitelist.entries.findIndex(entry => entry.command.trim() === trimmed);
 
   if (index === -1) {
     return false;
@@ -511,23 +515,37 @@ export default function (pi: ExtensionAPI) {
 
     const command = event.input.command as string;
 
-    // Check blocked commands
-    if (config.blockedCommands?.some(pattern => new RegExp(pattern).test(command))) {
-      const reason = "Command matches blocked pattern";
+    const parsed = splitCommand(command);
+    const segments = parsed.segments.map(segment => segment.trim()).filter(Boolean);
+    const segmentsToCheck = segments.length > 0 ? segments : (command.trim() ? [command.trim()] : []);
+
+    const whitelist = loadWhitelist(ctx.cwd);
+    const whitelistSet = new Set(whitelist.entries.map(entry => entry.command.trim()).filter(Boolean));
+
+    const isBlockedSegment = (segment: string): boolean =>
+      config.blockedCommands?.some(pattern => new RegExp(pattern).test(segment)) ?? false;
+    const isSafeSegment = (segment: string): boolean =>
+      config.safeCommands?.some(pattern => new RegExp(pattern).test(segment)) ?? false;
+    const isWhitelistedSegment = (segment: string): boolean => whitelistSet.has(segment);
+
+    const blockedSegment = segmentsToCheck.find(segment => isBlockedSegment(segment));
+    if (blockedSegment) {
+      const reason = `Command segment matches blocked pattern: ${blockedSegment}`;
       debugNotify(ctx, settings, `Blocked: ${reason}`);
       return await blockAndStop(ctx, command, reason, pi);
     }
 
-    // Check whitelist (always allow)
-    const whitelist = loadWhitelist(ctx.cwd);
-    if (whitelist.entries.some(entry => entry.command === command)) {
-      debugNotify(ctx, settings, "Allowed: command is in whitelist");
-      return undefined;
+    if (parsed.requiresConfirmation) {
+      debugNotify(ctx, settings, "Parsed command requires confirmation");
     }
 
-    // Check safe commands
-    if (config.safeCommands?.some(pattern => new RegExp(pattern).test(command))) {
-      debugNotify(ctx, settings, "Allowed: command matches safeCommands pattern");
+    const allAllowed =
+      !parsed.requiresConfirmation &&
+      segmentsToCheck.length > 0 &&
+      segmentsToCheck.every(segment => isWhitelistedSegment(segment) || isSafeSegment(segment));
+
+    if (allAllowed) {
+      debugNotify(ctx, settings, "Allowed: all segments match whitelist/safe patterns");
       return undefined; // Allow without confirmation
     }
 
