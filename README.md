@@ -328,7 +328,7 @@ Working directory: /home/user/project
 **Options:**
 - **Allow** (1): Execute the command as-is
 - **Always Accept (Exact)** (2): Add an exact-match command whitelist entry
-- **Always Accept (Generic)** (3): Generate a regex pattern, review/edit it, then whitelist it
+- **Always Accept (Generic)** (3): The dialog always shows the generated regex preview; selecting this lets you review/edit and whitelist it
 - **Edit** (4): Open an editor to modify the command before approval
 - **Block** (5 or ESC): Cancel the command execution
 

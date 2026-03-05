@@ -163,6 +163,17 @@ function classifyDynamicValue(value: string): { regex: string; example: string }
   return null;
 }
 
+function shouldGeneralizeQuotedLiteral(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+
+  // Keep very simple quoted literals exact.
+  if (/^[\w./~-]+$/.test(trimmed)) return false;
+
+  // Scripts and free-form text are likely variable and should be generalized.
+  return /[\s()[\]{}'";,:!+=*?]/.test(trimmed);
+}
+
 function tokenizeWithExamples(command: string): GeneratedPattern {
   const trimmed = command.trim();
   if (!trimmed) {
@@ -187,6 +198,7 @@ function tokenizeWithExamples(command: string): GeneratedPattern {
   const patternParts: string[] = [];
   const exampleTokens = [...tokens];
   let dynamicCount = 0;
+  let generalizedQuotedLiterals = 0;
 
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -221,15 +233,17 @@ function tokenizeWithExamples(command: string): GeneratedPattern {
       const quote = token[0];
       const inner = token.slice(1, -1);
       const dynamic = classifyDynamicValue(inner);
-      if (dynamic) {
+      const shouldGeneralize = dynamic !== null || shouldGeneralizeQuotedLiteral(inner);
+      if (shouldGeneralize) {
         if (quote === "\"") {
           patternParts.push(`\"[^\"]+\"`);
-          exampleTokens[i] = `"${dynamic.example}"`;
+          exampleTokens[i] = `"${dynamic?.example ?? "value"}"`;
         } else {
           patternParts.push(`'[^']+'`);
-          exampleTokens[i] = `'${dynamic.example}'`;
+          exampleTokens[i] = `'${dynamic?.example ?? "value"}'`;
         }
         dynamicCount++;
+        if (dynamic === null) generalizedQuotedLiterals++;
         continue;
       }
       patternParts.push(escapeRegex(token));
@@ -254,6 +268,7 @@ function tokenizeWithExamples(command: string): GeneratedPattern {
 
   const warnings: string[] = [];
   if (dynamicCount === 0) warnings.push("No dynamic tokens detected. Pattern is effectively exact.");
+  if (generalizedQuotedLiterals > 0) warnings.push("Generalized quoted literal values; review before saving.");
   if (pattern.includes(".*")) warnings.push("Pattern contains broad wildcard (.*). Consider tightening it.");
 
   return { pattern, dynamicCount, examples, warnings };
@@ -1244,6 +1259,8 @@ export default function (pi: ExtensionAPI) {
     ringTerminalBell();
 
     // Show confirmation dialog
+    const genericPreview = tokenizeWithExamples(command);
+
     const result = await ctx.ui.custom((tui, theme, _kb, done) => {
       let selectedIndex = 0;
       const options = [
@@ -1315,6 +1332,21 @@ export default function (pi: ExtensionAPI) {
           if (opt.description) {
             lines.push(`    ${theme.fg("muted", opt.description)}`);
           }
+
+          if (opt.value === "always-accept-generic") {
+            const previewWidth = Math.max(10, width - 8);
+            const previewLines = wrapTextWithAnsi(`Pattern: ${genericPreview.pattern}`, previewWidth);
+            for (const line of previewLines) {
+              lines.push(`    ${theme.fg("dim", line)}`);
+            }
+
+            if (genericPreview.examples[1]) {
+              const exampleLines = wrapTextWithAnsi(`Example: ${genericPreview.examples[1]}`, previewWidth);
+              for (const line of exampleLines) {
+                lines.push(`    ${theme.fg("muted", line)}`);
+              }
+            }
+          }
         }
 
         // Help text
@@ -1347,7 +1379,7 @@ export default function (pi: ExtensionAPI) {
       }
       case "always-accept-generic": {
         debugNotify(ctx, settings, "User chose generic whitelist pattern");
-        const generated = tokenizeWithExamples(command);
+        const generated = genericPreview;
 
         ctx.ui.notify(`Generated pattern: ${generated.pattern}`, "info");
         if (generated.examples[1]) {
