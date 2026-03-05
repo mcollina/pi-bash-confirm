@@ -473,6 +473,340 @@ function parseValueAndNote(input: string): { value: string; note?: string } {
   return { value, note };
 }
 
+type WhitelistAnalysisSnapshot = {
+  exactEntries: string[];
+  patternEntries: string[];
+  exactCoveredByPattern: Array<{ command: string; matchingPatterns: string[] }>;
+  prefixGroups: Array<{ prefix: string; commands: string[] }>;
+};
+
+type PendingGeneralizationRequest = {
+  cwd: string;
+  whitelistFingerprint: string;
+};
+
+type AiGeneralizationPlan = {
+  addPatterns: Array<{ pattern: string; note?: string }>;
+  removeExact: string[];
+};
+
+type AppliedGeneralizationResult = {
+  addedPatterns: string[];
+  removedExact: string[];
+  skipped: string[];
+};
+
+const GENERALIZE_MARKER = "[BASH_CONFIRM_GENERALIZE_V1]";
+let pendingGeneralizationRequest: PendingGeneralizationRequest | undefined;
+
+function buildWhitelistAnalysisSnapshot(entries: WhitelistEntry[]): WhitelistAnalysisSnapshot {
+  const exactEntries = entries
+    .filter(entry => entry.type === "exact")
+    .map(entry => entry.value)
+    .filter(Boolean);
+
+  const patternEntries = entries
+    .filter(entry => entry.type === "pattern")
+    .map(entry => entry.value)
+    .filter(Boolean);
+
+  const exactCoveredByPattern = exactEntries
+    .map(command => {
+      const matchingPatterns = patternEntries.filter(pattern => {
+        try {
+          return new RegExp(pattern).test(command);
+        } catch {
+          return false;
+        }
+      });
+      return { command, matchingPatterns };
+    })
+    .filter(item => item.matchingPatterns.length > 0)
+    .slice(0, 40);
+
+  const byPrefix = new Map<string, string[]>();
+  for (const command of exactEntries) {
+    const tokens = tokenizeCommand(command);
+    const key = tokens.slice(0, 2).join(" ").trim() || tokens[0] || command;
+    const group = byPrefix.get(key);
+    if (group) {
+      group.push(command);
+    } else {
+      byPrefix.set(key, [command]);
+    }
+  }
+
+  const prefixGroups = [...byPrefix.entries()]
+    .map(([prefix, commands]) => ({ prefix, commands }))
+    .filter(group => group.commands.length >= 2)
+    .sort((a, b) => b.commands.length - a.commands.length)
+    .slice(0, 30);
+
+  // Keep response bounded for AI context.
+  return {
+    exactEntries: exactEntries.slice(0, 200),
+    patternEntries: patternEntries.slice(0, 200),
+    exactCoveredByPattern,
+    prefixGroups,
+  };
+}
+
+function buildWhitelistFingerprint(whitelist: WhitelistData): string {
+  const normalized = whitelist.entries
+    .map(entry => `${entry.type}:${entry.value}`)
+    .sort()
+    .join("\n");
+  return `${whitelist.version}:${normalized}`;
+}
+
+function buildAiGeneralizationPrompt(cwd: string, whitelist: WhitelistData): string {
+  const snapshot = buildWhitelistAnalysisSnapshot(whitelist.entries);
+
+  return [
+    GENERALIZE_MARKER,
+    "You are reviewing a bash command permission whitelist for overlap and generalization opportunities.",
+    "",
+    "Goal:",
+    "- Recommend safe regex pattern entries that can replace multiple exact entries.",
+    "- Flag redundant exact entries already covered by existing patterns.",
+    "- Be conservative: avoid broad patterns, avoid using .* unless strictly scoped.",
+    "",
+    "Safety constraints:",
+    "- Anchor all patterns with ^ and $",
+    "- Prefer explicit token classes like [\\w./-]+, \\d+, or fixed literals",
+    "- Do not suggest patterns equivalent to ^.*$ or ^.+$",
+    "",
+    "Return ONLY valid JSON with this exact shape:",
+    '{"summary":["..."],"addPatterns":[{"pattern":"^...$","note":"..."}],"removeExact":["exact command"]}',
+    "",
+    `Project directory: ${cwd}`,
+    `Whitelist version: ${whitelist.version}`,
+    `Total entries: ${whitelist.entries.length}`,
+    `Exact entries: ${snapshot.exactEntries.length}`,
+    `Pattern entries: ${snapshot.patternEntries.length}`,
+    "",
+    "Whitelist analysis snapshot (JSON):",
+    "```json",
+    JSON.stringify(snapshot, null, 2),
+    "```",
+  ].join("\n");
+}
+
+function extractFirstJsonObject(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced && fenced[1]) {
+    return fenced[1].trim();
+  }
+
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    return trimmed;
+  }
+
+  const firstBrace = trimmed.indexOf("{");
+  if (firstBrace === -1) return undefined;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = firstBrace; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === "{") depth++;
+    if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        return trimmed.slice(firstBrace, i + 1);
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function parseAiGeneralizationPlan(text: string): { plan?: AiGeneralizationPlan; error?: string } {
+  const jsonText = extractFirstJsonObject(text);
+  if (!jsonText) {
+    return { error: "No JSON object found in AI response" };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { error: `Failed to parse AI JSON: ${message}` };
+  }
+
+  if (!isPlainObject(parsed)) {
+    return { error: "AI response JSON must be an object" };
+  }
+
+  const addPatternsRaw = parsed.addPatterns;
+  const removeExactRaw = parsed.removeExact;
+
+  const addPatterns: Array<{ pattern: string; note?: string }> = [];
+  if (Array.isArray(addPatternsRaw)) {
+    for (const item of addPatternsRaw) {
+      if (typeof item === "string") {
+        const pattern = item.trim();
+        if (pattern) addPatterns.push({ pattern });
+        continue;
+      }
+      if (isPlainObject(item) && typeof item.pattern === "string") {
+        const pattern = item.pattern.trim();
+        if (!pattern) continue;
+        const note = typeof item.note === "string" && item.note.trim() ? item.note.trim() : undefined;
+        addPatterns.push({ pattern, note });
+      }
+    }
+  }
+
+  const removeExact = Array.isArray(removeExactRaw)
+    ? removeExactRaw.filter((item): item is string => typeof item === "string").map(item => item.trim()).filter(Boolean)
+    : [];
+
+  if (addPatterns.length === 0 && removeExact.length === 0) {
+    return { error: "AI plan contains no actionable changes" };
+  }
+
+  return { plan: { addPatterns, removeExact } };
+}
+
+function extractLastAssistantText(messages: unknown[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i] as any;
+    if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+
+    const text = message.content
+      .filter((content: any) => content?.type === "text" && typeof content.text === "string")
+      .map((content: any) => content.text)
+      .join("")
+      .trim();
+
+    if (text) return text;
+  }
+  return undefined;
+}
+
+function applyAiGeneralizationPlan(cwd: string, plan: AiGeneralizationPlan): AppliedGeneralizationResult {
+  const whitelist = loadWhitelist(cwd);
+
+  const existingPatternSet = new Set(
+    whitelist.entries
+      .filter(entry => entry.type === "pattern")
+      .map(entry => entry.value)
+  );
+  const existingExactSet = new Set(
+    whitelist.entries
+      .filter(entry => entry.type === "exact")
+      .map(entry => entry.value)
+  );
+
+  const addedPatterns: string[] = [];
+  const skipped: string[] = [];
+
+  for (const candidate of plan.addPatterns) {
+    const pattern = candidate.pattern.trim();
+    if (!pattern) continue;
+
+    const validation = validateWhitelistPattern(pattern);
+    if (validation.ok === false) {
+      skipped.push(`Skipped invalid pattern ${pattern}: ${validation.reason}`);
+      continue;
+    }
+
+    if (existingPatternSet.has(pattern)) {
+      skipped.push(`Pattern already exists: ${pattern}`);
+      continue;
+    }
+
+    existingPatternSet.add(pattern);
+    addedPatterns.push(pattern);
+  }
+
+  const coverageRegexes: RegExp[] = [];
+  for (const pattern of existingPatternSet) {
+    try {
+      coverageRegexes.push(new RegExp(pattern));
+    } catch {
+      // Ignore invalid regexes
+    }
+  }
+
+  const removeSet = new Set<string>();
+  for (const command of plan.removeExact) {
+    const trimmed = command.trim();
+    if (!trimmed) continue;
+
+    if (!existingExactSet.has(trimmed)) {
+      skipped.push(`Exact entry not found: ${trimmed}`);
+      continue;
+    }
+
+    const isCovered = coverageRegexes.some(regex => regex.test(trimmed));
+    if (!isCovered) {
+      skipped.push(`Not removed (not covered by a pattern): ${trimmed}`);
+      continue;
+    }
+
+    removeSet.add(trimmed);
+  }
+
+  const removedExact: string[] = [];
+  const nextEntries = whitelist.entries.filter(entry => {
+    if (entry.type === "exact" && removeSet.has(entry.value)) {
+      removedExact.push(entry.value);
+      return false;
+    }
+    return true;
+  });
+
+  for (const pattern of addedPatterns) {
+    nextEntries.push({
+      type: "pattern",
+      value: pattern,
+      note: "AI suggest-generalize",
+      source: "ai",
+      addedAt: new Date().toISOString(),
+    });
+  }
+
+  if (addedPatterns.length > 0 || removedExact.length > 0) {
+    saveWhitelist(cwd, { version: 2, entries: nextEntries });
+  }
+
+  return { addedPatterns, removedExact, skipped };
+}
+
+function queueAiGeneralizationReview(pi: ExtensionAPI, ctx: ExtensionContext, whitelist: WhitelistData): void {
+  const prompt = buildAiGeneralizationPrompt(ctx.cwd, whitelist);
+
+  if (ctx.isIdle() === true) {
+    pi.sendUserMessage(prompt);
+  } else {
+    pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+  }
+}
+
 async function telegramCall<T>(options: {
   token: string;
   method: string;
@@ -775,6 +1109,63 @@ async function blockAndStop(
 }
 
 export default function (pi: ExtensionAPI) {
+  pi.on("agent_end", async (event, ctx) => {
+    const pending = pendingGeneralizationRequest;
+    if (!pending) return;
+
+    if (pending.cwd !== ctx.cwd) return;
+
+    pendingGeneralizationRequest = undefined;
+
+    const currentWhitelist = loadWhitelist(ctx.cwd);
+    const currentFingerprint = buildWhitelistFingerprint(currentWhitelist);
+    if (currentFingerprint !== pending.whitelistFingerprint) {
+      ctx.ui.notify("Whitelist changed while AI was analyzing; not auto-applying recommendations.", "warning");
+      return;
+    }
+
+    const assistantText = extractLastAssistantText(event.messages as unknown[]);
+    if (!assistantText) {
+      ctx.ui.notify("AI generalization response had no text output.", "warning");
+      return;
+    }
+
+    const parsed = parseAiGeneralizationPlan(assistantText);
+    if (!parsed.plan) {
+      ctx.ui.notify(`Could not apply AI recommendations: ${parsed.error}`, "warning");
+      return;
+    }
+
+    if (ctx.hasUI === true) {
+      const shouldApply = await ctx.ui.confirm(
+        "Apply AI whitelist recommendations?",
+        `Add patterns: ${parsed.plan.addPatterns.length}\nRemove exact entries: ${parsed.plan.removeExact.length}`,
+      );
+      if (shouldApply !== true) {
+        ctx.ui.notify("Skipped applying AI recommendations.", "info");
+        return;
+      }
+    }
+
+    const applied = applyAiGeneralizationPlan(ctx.cwd, parsed.plan);
+    if (applied.addedPatterns.length === 0 && applied.removedExact.length === 0) {
+      ctx.ui.notify("AI recommendations produced no safe whitelist changes.", "warning");
+      if (applied.skipped.length > 0) {
+        ctx.ui.notify(applied.skipped.slice(0, 3).join(" | "), "info");
+      }
+      return;
+    }
+
+    ctx.ui.notify(
+      `Applied AI recommendations: +${applied.addedPatterns.length} pattern(s), -${applied.removedExact.length} exact entry(ies).`,
+      "success",
+    );
+
+    if (applied.skipped.length > 0) {
+      ctx.ui.notify(`Skipped ${applied.skipped.length} recommendation(s).`, "info");
+    }
+  });
+
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName !== "bash") return undefined;
 
@@ -1072,6 +1463,23 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      if (cmd === "suggest-generalize" || cmd === "sg") {
+        const whitelist = loadWhitelist(ctx.cwd);
+        if (whitelist.entries.length === 0) {
+          ctx.ui.notify("Whitelist is empty. Add entries first.", "warning");
+          return;
+        }
+
+        pendingGeneralizationRequest = {
+          cwd: ctx.cwd,
+          whitelistFingerprint: buildWhitelistFingerprint(whitelist),
+        };
+
+        queueAiGeneralizationReview(pi, ctx, whitelist);
+        ctx.ui.notify("Queued AI whitelist generalization review. Recommendations will be applied after confirmation.", "info");
+        return;
+      }
+
       // Whitelist commands
       if (cmd === "whitelist" || cmd.startsWith("whitelist ")) {
         const wlInput = cmd.slice("whitelist".length).trim();
@@ -1089,6 +1497,23 @@ export default function (pi: ExtensionAPI) {
               ctx.ui.notify(formatWhitelistEntry(entry, i), "info");
             });
           }
+          return;
+        }
+
+        if (subcommand === "suggest-generalize" || subcommand === "sg") {
+          const whitelist = loadWhitelist(ctx.cwd);
+          if (whitelist.entries.length === 0) {
+            ctx.ui.notify("Whitelist is empty. Add entries first.", "warning");
+            return;
+          }
+
+          pendingGeneralizationRequest = {
+            cwd: ctx.cwd,
+            whitelistFingerprint: buildWhitelistFingerprint(whitelist),
+          };
+
+          queueAiGeneralizationReview(pi, ctx, whitelist);
+          ctx.ui.notify("Queued AI whitelist generalization review. Recommendations will be applied after confirmation.", "info");
           return;
         }
 
@@ -1159,11 +1584,11 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        ctx.ui.notify("Usage: /bash-confirm whitelist [list|add|add-pattern|remove|clear|path]", "info");
+        ctx.ui.notify("Usage: /bash-confirm whitelist [list|add|add-pattern|suggest-generalize|remove|clear|path]", "info");
         return;
       }
 
-      ctx.ui.notify("Usage: /bash-confirm [test-notify|debug|whitelist ...]", "info");
+      ctx.ui.notify("Usage: /bash-confirm [test-notify|debug|suggest-generalize|whitelist ...]", "info");
     },
   });
 

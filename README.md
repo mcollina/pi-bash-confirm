@@ -368,6 +368,7 @@ Use the `/bash-confirm whitelist` subcommands:
 | `/bash-confirm whitelist list` | Show all whitelist entries |
 | `/bash-confirm whitelist add <command> [--note <note>]` | Add an exact-match whitelist entry |
 | `/bash-confirm whitelist add-pattern <regex> [--note <note>]` | Add a regex pattern whitelist entry |
+| `/bash-confirm whitelist suggest-generalize` | Ask AI to recommend safe pattern generalizations for overlapping entries |
 | `/bash-confirm whitelist remove <value>` | Remove entries with the exact stored value |
 | `/bash-confirm whitelist clear` | Remove all entries from whitelist |
 | `/bash-confirm whitelist path` | Show path to whitelist file |
@@ -397,6 +398,16 @@ Use the `/bash-confirm whitelist` subcommands:
 ```
 
 The whitelist file can be committed to version control if you want to share whitelisted commands with your team.
+
+### AI Suggestions for Overlapping Entries
+
+Run:
+
+```text
+/bash-confirm suggest-generalize
+```
+
+(or `/bash-confirm whitelist suggest-generalize`) to queue an AI review of your current whitelist. The AI returns a structured plan, then the extension asks for confirmation and applies safe changes automatically (add pattern entries + remove covered exact entries). If the whitelist changed during analysis, auto-apply is skipped for safety.
 
 ## Notification Examples
 
@@ -454,9 +465,11 @@ rm -rf ./old-dir-backup
 |---------|-------------|
 | `/bash-confirm test-notify` | Send a test notification to verify Telegram setup |
 | `/bash-confirm debug` | Display current configuration status |
+| `/bash-confirm suggest-generalize` | Ask AI to recommend whitelist generalizations |
 | `/bash-confirm whitelist list` | Show all whitelist entries |
 | `/bash-confirm whitelist add <cmd> [--note <note>]` | Add an exact command to the project whitelist |
 | `/bash-confirm whitelist add-pattern <regex> [--note <note>]` | Add a regex pattern to the project whitelist |
+| `/bash-confirm whitelist suggest-generalize` | Ask AI to recommend safe pattern generalizations |
 | `/bash-confirm whitelist remove <value>` | Remove whitelist entries matching a stored value |
 | `/bash-confirm whitelist clear` | Remove all entries from the whitelist |
 | `/bash-confirm whitelist path` | Show path to the whitelist file |
