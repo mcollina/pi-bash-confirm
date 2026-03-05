@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { completeSimple } from "@mariozechner/pi-ai";
 import { wrapTextWithAnsi } from "@mariozechner/pi-tui";
 import https from "node:https";
 import { splitCommand } from "./command-splitter.ts";
@@ -511,7 +512,16 @@ type AppliedGeneralizationResult = {
   skipped: string[];
 };
 
+type AutoAcceptDecision = "allow" | "review";
+
+type AutoAcceptResult = {
+  decision: AutoAcceptDecision;
+  reason: string;
+  modelRef: string;
+};
+
 const GENERALIZE_MARKER = "[BASH_CONFIRM_GENERALIZE_V1]";
+const AUTO_ACCEPT_MARKER = "[BASH_CONFIRM_AUTO_ACCEPT_V1]";
 let pendingGeneralizationRequest: PendingGeneralizationRequest | undefined;
 
 function buildWhitelistAnalysisSnapshot(entries: WhitelistEntry[]): WhitelistAnalysisSnapshot {
@@ -704,6 +714,207 @@ function parseAiGeneralizationPlan(text: string): { plan?: AiGeneralizationPlan;
   }
 
   return { plan: { addPatterns, removeExact } };
+}
+
+function parseModelReference(ref: string): { provider: string; modelId: string } | undefined {
+  const trimmed = ref.trim();
+  if (!trimmed) return undefined;
+
+  const separator = trimmed.indexOf("/");
+  if (separator <= 0 || separator >= trimmed.length - 1) return undefined;
+
+  return {
+    provider: trimmed.slice(0, separator),
+    modelId: trimmed.slice(separator + 1),
+  };
+}
+
+function buildAutoAcceptPrompt(cwd: string, command: string): string {
+  return [
+    AUTO_ACCEPT_MARKER,
+    "You are a security gate for bash command execution.",
+    "Return ONLY JSON with shape:",
+    '{"decision":"allow|review","reason":"short explanation"}',
+    "",
+    "Decision policy:",
+    "- allow: read-only, navigation, inspection, harmless local operations",
+    "- review: destructive, privilege escalation, data exfiltration, risky remote execution, or uncertain",
+    "",
+    "Be conservative. If uncertain, return review.",
+    "",
+    `Working directory: ${cwd}`,
+    `Command: ${command}`,
+  ].join("\n");
+}
+
+function extractAssistantTextFromContent(message: unknown): string {
+  if (!isPlainObject(message)) return "";
+
+  const content = message.content;
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+
+  const chunks: string[] = [];
+  for (const item of content) {
+    if (!isPlainObject(item)) continue;
+
+    if (item.type === "text" && typeof item.text === "string") {
+      chunks.push(item.text);
+      continue;
+    }
+
+    // Fallback for providers that expose only thinking content.
+    if (item.type === "thinking" && typeof item.thinking === "string") {
+      chunks.push(item.thinking);
+      continue;
+    }
+
+    // Some models may respond via tool-call style JSON arguments even without text chunks.
+    if (item.type === "toolCall" && isPlainObject(item.arguments)) {
+      chunks.push(JSON.stringify(item.arguments));
+      continue;
+    }
+
+    if (item.type === "toolCall" && typeof item.arguments === "string") {
+      chunks.push(item.arguments);
+      continue;
+    }
+
+    if (typeof item.text === "string") {
+      chunks.push(item.text);
+    }
+  }
+
+  return chunks.join("").trim();
+}
+
+function parseAutoAcceptDecision(text: string): { result?: AutoAcceptResult; error?: string } {
+  const jsonText = extractFirstJsonObject(text);
+  if (!jsonText) {
+    return { error: "No JSON object found in auto-accept response" };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { error: `Failed to parse auto-accept JSON: ${message}` };
+  }
+
+  if (!isPlainObject(parsed)) {
+    return { error: "Auto-accept JSON response must be an object" };
+  }
+
+  const decisionRaw = typeof parsed.decision === "string" ? parsed.decision.trim().toLowerCase() : "";
+  if (decisionRaw !== "allow" && decisionRaw !== "review" && decisionRaw !== "block") {
+    return { error: "Auto-accept decision must be one of allow|review" };
+  }
+
+  const reasonRaw = typeof parsed.reason === "string" ? parsed.reason.trim() : "";
+  const normalizedDecision: AutoAcceptDecision = decisionRaw === "allow" ? "allow" : "review";
+  const normalizedReason =
+    decisionRaw === "block"
+      ? `Model requested block; falling back to manual review. ${reasonRaw || "No reason provided"}`
+      : (reasonRaw || "No reason provided");
+
+  return {
+    result: {
+      decision: normalizedDecision,
+      reason: normalizedReason,
+      modelRef: "",
+    },
+  };
+}
+
+async function evaluateAutoAcceptCommand(
+  command: string,
+  ctx: ExtensionContext,
+  settings: JsonObject,
+): Promise<{ result?: AutoAcceptResult; error?: string }> {
+  const configuredModel = (getSetting(settings, "bashConfirm.autoAccept.model", "") as string).trim();
+
+  let model = ctx.model;
+  if (configuredModel) {
+    const parsedRef = parseModelReference(configuredModel);
+    if (!parsedRef) {
+      return { error: "bashConfirm.autoAccept.model must be in format <provider>/<modelId>" };
+    }
+
+    model = ctx.modelRegistry.find(parsedRef.provider, parsedRef.modelId);
+    if (!model) {
+      return { error: `Configured auto-accept model not found: ${configuredModel}` };
+    }
+  }
+
+  if (!model) {
+    return { error: "No active model available for auto-accept" };
+  }
+
+  const modelRef = `${model.provider}/${model.id}`;
+  const apiKey = await ctx.modelRegistry.getApiKey(model);
+  const timeoutMsRaw = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
+  const timeoutMsNumber = Number(timeoutMsRaw);
+  const timeoutMs = Number.isFinite(timeoutMsNumber)
+    ? Math.min(20000, Math.max(1000, timeoutMsNumber))
+    : 5000;
+
+  const timeoutController = new AbortController();
+  const timeoutHandle = setTimeout(() => timeoutController.abort(), timeoutMs);
+
+  try {
+    const assistant = await completeSimple(
+      model,
+      {
+        systemPrompt: "You are a strict bash security reviewer. Output JSON only.",
+        messages: [{ role: "user", content: buildAutoAcceptPrompt(ctx.cwd, command), timestamp: Date.now() }],
+      },
+      {
+        apiKey,
+        reasoning: "minimal",
+        maxTokens: 120,
+        signal: timeoutController.signal,
+      },
+    );
+
+    const responseText = extractAssistantTextFromContent(assistant);
+    if (!responseText) {
+      const modelError = isPlainObject(assistant) && typeof assistant.errorMessage === "string"
+        ? assistant.errorMessage.trim()
+        : "";
+      const stopReason = isPlainObject(assistant) && typeof assistant.stopReason === "string"
+        ? assistant.stopReason
+        : "";
+      const diagnostic = modelError || (stopReason ? `No text output (stopReason=${stopReason})` : "Model returned no text");
+
+      return {
+        result: {
+          decision: "review",
+          reason: `${diagnostic}; falling back to manual review.`,
+          modelRef,
+        },
+      };
+    }
+
+    const parsedDecision = parseAutoAcceptDecision(responseText);
+    if (!parsedDecision.result) {
+      return {
+        result: {
+          decision: "review",
+          reason: `${parsedDecision.error || "Failed to parse auto-accept response"}; falling back to manual review.`,
+          modelRef,
+        },
+      };
+    }
+
+    parsedDecision.result.modelRef = modelRef;
+    return { result: parsedDecision.result };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { error: `Auto-accept model request failed: ${message}` };
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 }
 
 function extractLastAssistantText(messages: unknown[]): string | undefined {
@@ -1189,6 +1400,11 @@ export default function (pi: ExtensionAPI) {
       enabled?: boolean;
       safeCommands?: string[];
       blockedCommands?: string[];
+      autoAccept?: {
+        enabled?: boolean;
+        model?: string;
+        timeoutMs?: number;
+      };
     };
 
     if (!config.enabled) {
@@ -1242,6 +1458,30 @@ export default function (pi: ExtensionAPI) {
     if (allAllowed) {
       debugNotify(ctx, settings, "Allowed: all segments matched exact/pattern whitelist or safeCommands");
       return undefined; // Allow without confirmation
+    }
+
+    const autoAcceptEnabled = config.autoAccept?.enabled === true;
+    if (autoAcceptEnabled) {
+      const autoAccept = await evaluateAutoAcceptCommand(command, ctx, settings);
+      if (autoAccept.result) {
+        if (autoAccept.result.decision === "allow") {
+          debugNotify(
+            ctx,
+            settings,
+            `auto-accept allowed command via ${autoAccept.result.modelRef}: ${autoAccept.result.reason}`,
+          );
+          ctx.ui.notify(`auto-accept allowed command: ${autoAccept.result.reason}`, "info");
+          return undefined;
+        }
+
+        debugNotify(
+          ctx,
+          settings,
+          `auto-accept requested manual review via ${autoAccept.result.modelRef}: ${autoAccept.result.reason}`,
+        );
+      } else if (autoAccept.error) {
+        ctx.ui.notify(`auto-accept unavailable: ${autoAccept.error}`, "warning");
+      }
     }
 
     // No UI available - block for safety
@@ -1460,12 +1700,19 @@ export default function (pi: ExtensionAPI) {
         const forceIpv4 = getSetting(settings, "bashConfirm.notifications.telegram.forceIpv4", true);
         const safeCommands = getSetting(settings, "bashConfirm.safeCommands", []) as string[];
         const blockedCommands = getSetting(settings, "bashConfirm.blockedCommands", []) as string[];
+        const autoAcceptEnabled = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
+        const autoAcceptModel = getSetting(settings, "bashConfirm.autoAccept.model", "");
+        const autoAcceptTimeoutMs = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
 
         ctx.ui.notify(`bash-confirm: enabled=${enabled}, debug=${debugEnabled}`, "info");
         ctx.ui.notify(`notifications: enabled=${notifyEnabled}, onShown=${onShown}, onBlocked=${onBlocked}, onModified=${onModified}`, "info");
         ctx.ui.notify(`telegram: token=${maskToken(token)}, chatId=${chatId || "(missing)"}, timeoutMs=${timeoutMs}, forceIpv4=${forceIpv4}`, "info");
         ctx.ui.notify(`safeCommands: [${safeCommands.join(", ") || "(none)"}]`, "info");
         ctx.ui.notify(`blockedCommands: [${blockedCommands.join(", ") || "(none)"}]`, "info");
+        ctx.ui.notify(
+          `autoAccept: enabled=${autoAcceptEnabled}, model=${autoAcceptModel || "(current model)"}, timeoutMs=${autoAcceptTimeoutMs}`,
+          "info",
+        );
         ctx.ui.notify(`settings: global=${globalSettingsPath}`, "info");
         ctx.ui.notify(`settings: project=${projectSettingsPath}`, "info");
 
@@ -1492,6 +1739,42 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.notify(`Telegram connection failed: ${err}`, "warning");
           }
         }
+        return;
+      }
+
+      if (cmd === "auto-accept" || cmd.startsWith("auto-accept ")) {
+        const autoArgs = cmd.slice("auto-accept".length).trim();
+        const autoEnabled = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
+        const autoModel = getSetting(settings, "bashConfirm.autoAccept.model", "");
+        const autoTimeoutMs = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
+
+        if (!autoArgs || autoArgs === "status") {
+          ctx.ui.notify(`auto-accept enabled: ${autoEnabled}`, "info");
+          ctx.ui.notify(`auto-accept model: ${autoModel || "(current model)"}`, "info");
+          ctx.ui.notify(`auto-accept timeoutMs: ${autoTimeoutMs}`, "info");
+          return;
+        }
+
+        if (autoArgs.startsWith("test ")) {
+          const testCommand = autoArgs.slice("test ".length).trim();
+          if (!testCommand) {
+            ctx.ui.notify("Usage: /bash-confirm auto-accept test <command>", "warning");
+            return;
+          }
+
+          const evaluated = await evaluateAutoAcceptCommand(testCommand, ctx, settings);
+          if (evaluated.result) {
+            ctx.ui.notify(
+              `auto-accept (${evaluated.result.modelRef}): ${evaluated.result.decision} — ${evaluated.result.reason}`,
+              "info",
+            );
+          } else {
+            ctx.ui.notify(`auto-accept test failed: ${evaluated.error}`, "warning");
+          }
+          return;
+        }
+
+        ctx.ui.notify("Usage: /bash-confirm auto-accept [status|test <command>]", "info");
         return;
       }
 
@@ -1620,7 +1903,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /bash-confirm [test-notify|debug|suggest-generalize|whitelist ...]", "info");
+      ctx.ui.notify("Usage: /bash-confirm [test-notify|debug|auto-accept ...|suggest-generalize|whitelist ...]", "info");
     },
   });
 

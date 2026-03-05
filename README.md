@@ -9,7 +9,8 @@ A [pi](https://github.com/mariozechner/pi) package that adds a confirmation dial
 - **Per-Project Whitelist**: Commands added as exact or regex-pattern entries won't prompt again in that project
 - **Edit Mode**: Modify commands before approval using pi's built-in editor
 - **Telegram Notifications**: Get notified when commands are blocked or modified
-- **Non-Interactive Safety**: Blocks commands when UI is unavailable unless they match safe patterns
+- **Optional auto-accept Mode**: Let a configurable fast model auto-allow or route to manual review
+- **Non-Interactive Safety**: Blocks commands when UI is unavailable unless they match safe patterns (or auto-accept explicitly allows)
 - **Easy Configuration**: All settings configurable via `settings.json` or environment variables
 
 ## Installation
@@ -38,7 +39,12 @@ Create or edit `~/.pi/agent/settings.json` (global) or `.pi/settings.json` (proj
       "sudo .* rm",
       ":>.*",
       "^dd "
-    ]
+    ],
+    "autoAccept": {
+      "enabled": false,
+      "model": "openrouter/google/gemini-2.0-flash-001",
+      "timeoutMs": 5000
+    }
   }
 }
 ```
@@ -114,6 +120,9 @@ View your current configuration:
 | `debug` | boolean | `false` | Show debug notifications explaining why a command was allowed/blocked |
 | `safeCommands` | string[] | `[]` | Regex patterns for auto-allowed commands |
 | `blockedCommands` | string[] | `[]` | Regex patterns for always-blocked commands |
+| `autoAccept.enabled` | boolean | `false` | Enable optional model-based auto-accept decision flow |
+| `autoAccept.model` | string | `""` | Model reference (`provider/modelId`) used for auto-accept; falls back to current model when empty |
+| `autoAccept.timeoutMs` | number | `5000` | Timeout for auto-accept model request (clamped to 1000-20000 ms) |
 
 ### Notification Options
 
@@ -409,6 +418,35 @@ Run:
 
 (or `/bash-confirm whitelist suggest-generalize`) to queue an AI review of your current whitelist. The AI returns a structured plan, then the extension asks for confirmation and applies safe changes automatically (add pattern entries + remove covered exact entries). If the whitelist changed during analysis, auto-apply is skipped for safety.
 
+## Optional `auto-accept` Mode (Fast Model)
+
+When `bashConfirm.autoAccept.enabled` is `true`, commands that would normally open the confirmation dialog are first reviewed by a fast model.
+
+The model must return one of:
+- `allow` → command executes immediately
+- `review` → fallback to the normal confirmation dialog (or block in non-interactive mode)
+
+If the model returns `block`, the extension downgrades that to `review` and asks a human.
+
+Example:
+
+```json
+{
+  "bashConfirm": {
+    "autoAccept": {
+      "enabled": true,
+      "model": "openrouter/google/gemini-2.0-flash-001",
+      "timeoutMs": 4000
+    }
+  }
+}
+```
+
+Notes:
+- This mode is **optional** and off by default.
+- Use a low-latency model to keep shell flow responsive.
+- The command text is sent to the configured model for evaluation.
+
 ## Notification Examples
 
 ### Dialog Shown Notification
@@ -465,6 +503,8 @@ rm -rf ./old-dir-backup
 |---------|-------------|
 | `/bash-confirm test-notify` | Send a test notification to verify Telegram setup |
 | `/bash-confirm debug` | Display current configuration status |
+| `/bash-confirm auto-accept` | Show auto-accept status (enabled/model/timeout) |
+| `/bash-confirm auto-accept test <command>` | Test auto-accept decision for a command without executing it |
 | `/bash-confirm suggest-generalize` | Ask AI to recommend whitelist generalizations |
 | `/bash-confirm whitelist list` | Show all whitelist entries |
 | `/bash-confirm whitelist add <cmd> [--note <note>]` | Add an exact command to the project whitelist |
@@ -488,9 +528,11 @@ Settings are loaded in this order (later overrides earlier):
 When pi is running in non-interactive mode (print, JSON, RPC), the extension will:
 
 - Block all bash commands unless they match a `safeCommands` pattern
+- If `auto-accept` is enabled, run model review first (`allow`/`review`)
+- Block when manual confirmation is required but no UI is available
 - Send blocked command notifications (if configured)
 
-To allow commands in non-interactive mode, add them to `safeCommands`.
+To allow commands in non-interactive mode, add them to `safeCommands` or enable `auto-accept` with a conservative fast model.
 
 ## Troubleshooting
 
