@@ -1415,8 +1415,9 @@ export default function (pi: ExtensionAPI) {
     const command = event.input.command as string;
 
     const parsed = splitCommand(command);
+    const trimmedCommand = command.trim();
     const segments = parsed.segments.map(segment => segment.trim()).filter(Boolean);
-    const segmentsToCheck = segments.length > 0 ? segments : (command.trim() ? [command.trim()] : []);
+    const segmentsToCheck = segments.length > 0 ? segments : (trimmedCommand ? [trimmedCommand] : []);
 
     const whitelist = loadWhitelist(ctx.cwd);
     const exactWhitelistSet = new Set(
@@ -1434,6 +1435,9 @@ export default function (pi: ExtensionAPI) {
     const isExactWhitelistedSegment = (segment: string): boolean => exactWhitelistSet.has(segment);
     const isPatternWhitelistedSegment = (segment: string): boolean =>
       whitelistPatterns.some(pattern => pattern.test(segment));
+    const isExactWhitelistedCommand = (fullCommand: string): boolean => exactWhitelistSet.has(fullCommand);
+    const isPatternWhitelistedCommand = (fullCommand: string): boolean =>
+      whitelistPatterns.some(pattern => pattern.test(fullCommand));
 
     const blockedSegment = segmentsToCheck.find(segment => isBlockedSegment(segment));
     if (blockedSegment) {
@@ -1446,8 +1450,11 @@ export default function (pi: ExtensionAPI) {
       debugNotify(ctx, settings, "Parsed command requires confirmation");
     }
 
-    const allAllowed =
-      !parsed.requiresConfirmation &&
+    const commandWhitelisted =
+      trimmedCommand.length > 0 &&
+      (isExactWhitelistedCommand(trimmedCommand) || isPatternWhitelistedCommand(trimmedCommand));
+
+    const allSegmentsAllowed =
       segmentsToCheck.length > 0 &&
       segmentsToCheck.every(segment => {
         if (isExactWhitelistedSegment(segment)) return true;
@@ -1455,6 +1462,12 @@ export default function (pi: ExtensionAPI) {
         return isSafeSegment(segment);
       });
 
+    if (commandWhitelisted) {
+      debugNotify(ctx, settings, "Allowed: full command matched exact/pattern whitelist");
+      return undefined; // Allow without confirmation
+    }
+
+    const allAllowed = !parsed.requiresConfirmation && allSegmentsAllowed;
     if (allAllowed) {
       debugNotify(ctx, settings, "Allowed: all segments matched exact/pattern whitelist or safeCommands");
       return undefined; // Allow without confirmation
