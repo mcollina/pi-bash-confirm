@@ -43,7 +43,8 @@ Create or edit `~/.pi/agent/settings.json` (global) or `.pi/settings.json` (proj
     "autoAccept": {
       "enabled": false,
       "model": "openrouter/google/gemini-2.0-flash-001",
-      "timeoutMs": 5000
+      "timeoutMs": 5000,
+      "strictness": "strict"
     }
   }
 }
@@ -123,6 +124,7 @@ View your current configuration:
 | `autoAccept.enabled` | boolean | `false` | Enable optional model-based auto-accept decision flow |
 | `autoAccept.model` | string | `""` | Model reference (`provider/modelId`) used for auto-accept; falls back to current model when empty |
 | `autoAccept.timeoutMs` | number | `5000` | Timeout for auto-accept model request (clamped to 1000-20000 ms) |
+| `autoAccept.strictness` | string | `"strict"` | Auto-accept policy mode: `strict` (narrow) or `permissive` (broader local dev writes allowed) |
 | `autoAccept.neverAllowPatterns` | string[] | `[]` | Regex patterns that must always require manual confirmation (auto-accept is skipped) |
 
 ### Notification Options
@@ -438,6 +440,7 @@ Example:
       "enabled": true,
       "model": "openrouter/google/gemini-2.0-flash-001",
       "timeoutMs": 4000,
+      "strictness": "strict",
       "neverAllowPatterns": [
         "^git\\s+push(?:\\s|$)",
         "^npm\\s+publish(?:\\s|$)"
@@ -449,10 +452,11 @@ Example:
 
 Notes:
 - This mode is **optional** and off by default.
-- The model prompt is conservative, but allows common check-only dev commands (for example `eslint` without `--fix`, `tsc --noEmit`, and lint/typecheck/test scripts).
-- Commands that mutate state (including fix/write flags, git history changes, install/publish/deploy, etc.) should fall back to manual review.
+- Use `autoAccept.strictness` to tune policy: `strict` favors check-only commands, while `permissive` can allow bounded local dev write workflows (for example `git commit`, `eslint --fix`, or `prettier --write`).
+- High-risk operations (for example rebase/reset/push, publish/deploy, destructive deletes, privilege escalation) should fall back to manual review.
 - Use `autoAccept.neverAllowPatterns` to force manual review for command families you never want auto-approved.
 - You can override auto-accept for the current session with `/bash-confirm auto-accept session on|off|clear`.
+- You can override strictness for the current session with `/bash-confirm auto-accept strictness strict|permissive|clear`.
 - Use a low-latency model to keep shell flow responsive.
 - The command text is sent to the configured model for evaluation.
 
@@ -512,8 +516,9 @@ rm -rf ./old-dir-backup
 |---------|-------------|
 | `/bash-confirm test-notify` | Send a test notification to verify Telegram setup |
 | `/bash-confirm debug` | Display current configuration status |
-| `/bash-confirm auto-accept` | Show auto-accept status (config/effective/session override/model/timeout) |
-| `/bash-confirm auto-accept session [status\|on\|off\|clear]` | Manage auto-accept override for the current session only |
+| `/bash-confirm auto-accept` | Show auto-accept status (config/effective/session override/model/strictness/timeout) |
+| `/bash-confirm auto-accept strictness [status\|strict\|permissive\|clear]` | Manage strictness override for the current session only |
+| `/bash-confirm auto-accept session [status\|on\|off\|clear]` | Manage auto-accept enable/disable override for the current session only |
 | `/bash-confirm auto-accept test <command>` | Test auto-accept decision for a command without executing it |
 | `/bash-confirm suggest-generalize` | Ask AI to recommend whitelist generalizations |
 | `/bash-confirm whitelist list` | Show all whitelist entries |

@@ -513,6 +513,7 @@ type AppliedGeneralizationResult = {
 };
 
 type AutoAcceptDecision = "allow" | "review";
+type AutoAcceptStrictness = "strict" | "permissive";
 
 type AutoAcceptResult = {
   decision: AutoAcceptDecision;
@@ -526,6 +527,7 @@ let pendingGeneralizationRequest: PendingGeneralizationRequest | undefined;
 
 type AutoAcceptSessionOverride = "on" | "off";
 const autoAcceptSessionOverrides = new Map<string, AutoAcceptSessionOverride>();
+const autoAcceptStrictnessSessionOverrides = new Map<string, AutoAcceptStrictness>();
 
 function getSessionOverrideKey(ctx: ExtensionContext): string {
   const sessionId = typeof ctx.sessionId === "string" && ctx.sessionId.trim()
@@ -544,6 +546,18 @@ function setAutoAcceptSessionOverride(ctx: ExtensionContext, mode: AutoAcceptSes
 
 function clearAutoAcceptSessionOverride(ctx: ExtensionContext): void {
   autoAcceptSessionOverrides.delete(getSessionOverrideKey(ctx));
+}
+
+function getAutoAcceptStrictnessSessionOverride(ctx: ExtensionContext): AutoAcceptStrictness | undefined {
+  return autoAcceptStrictnessSessionOverrides.get(getSessionOverrideKey(ctx));
+}
+
+function setAutoAcceptStrictnessSessionOverride(ctx: ExtensionContext, strictness: AutoAcceptStrictness): void {
+  autoAcceptStrictnessSessionOverrides.set(getSessionOverrideKey(ctx), strictness);
+}
+
+function clearAutoAcceptStrictnessSessionOverride(ctx: ExtensionContext): void {
+  autoAcceptStrictnessSessionOverrides.delete(getSessionOverrideKey(ctx));
 }
 
 function buildWhitelistAnalysisSnapshot(entries: WhitelistEntry[]): WhitelistAnalysisSnapshot {
@@ -751,18 +765,38 @@ function parseModelReference(ref: string): { provider: string; modelId: string }
   };
 }
 
-function buildAutoAcceptPrompt(cwd: string, command: string): string {
+function normalizeAutoAcceptStrictness(value: unknown): AutoAcceptStrictness {
+  if (typeof value !== "string") return "strict";
+  const normalized = value.trim().toLowerCase();
+  return normalized === "permissive" ? "permissive" : "strict";
+}
+
+function buildAutoAcceptPrompt(cwd: string, command: string, strictness: AutoAcceptStrictness): string {
+  const strictPolicy = [
+    "- allow when the command is clearly read-only/inspection/navigation and does not change files, git history, system state, or remote state.",
+    "- allow common local verification commands when they are check-only (for example: eslint without --fix, tsc --noEmit, npm/pnpm/yarn/bun run lint|typecheck|test, prettier --check).",
+    "- review for mutating operations: writes/edits, --fix/--write style flags, package install/update/remove, service/process control, permissions/ownership changes, git state changes (commit/rebase/reset/merge/push), publish/deploy/release, remote execution, or uncertainty.",
+    "- for command chains, allow only if every segment is clearly check-only/read-only; otherwise choose review.",
+  ];
+
+  const permissivePolicy = [
+    "- allow all strict-mode allow cases.",
+    "- allow low-risk local developer write operations inside the working tree when intent is clear and bounded (for example: git commit/amend, eslint --fix, prettier --write, test snapshot updates, local build output generation).",
+    "- review for high-risk operations: history rewrites beyond commit/amend (rebase/reset), remote or publishing actions (push/publish/deploy/release), destructive deletes, privilege escalation, broad permission/ownership changes, remote execution, or uncertainty.",
+    "- for command chains, choose review if any segment is high-risk or unclear.",
+  ];
+
+  const policyLines = strictness === "permissive" ? permissivePolicy : strictPolicy;
+
   return [
     AUTO_ACCEPT_MARKER,
     "You are a security gate for bash command execution.",
     "Return ONLY JSON with shape:",
     '{"decision":"allow|review","reason":"short explanation"}',
     "",
+    `Strictness mode: ${strictness}`,
     "Decision policy:",
-    "- allow when the command is clearly read-only/inspection/navigation and does not change files, git history, system state, or remote state.",
-    "- allow common local verification commands when they are check-only (for example: eslint without --fix, tsc --noEmit, npm/pnpm/yarn/bun run lint|typecheck|test, prettier --check).",
-    "- review for mutating operations: writes/edits, --fix/--write style flags, package install/update/remove, service/process control, permissions/ownership changes, git state changes (commit/rebase/reset/merge/push), publish/deploy/release, remote execution, or uncertainty.",
-    "- for command chains, allow only if every segment is clearly check-only/read-only; otherwise choose review.",
+    ...policyLines,
     "",
     "Be conservative. If uncertain, return review.",
     "",
@@ -855,8 +889,10 @@ async function evaluateAutoAcceptCommand(
   command: string,
   ctx: ExtensionContext,
   settings: JsonObject,
+  strictnessOverride?: AutoAcceptStrictness,
 ): Promise<{ result?: AutoAcceptResult; error?: string }> {
   const configuredModel = (getSetting(settings, "bashConfirm.autoAccept.model", "") as string).trim();
+  const strictness = strictnessOverride ?? normalizeAutoAcceptStrictness(getSetting(settings, "bashConfirm.autoAccept.strictness", "strict"));
 
   let model = ctx.model;
   if (configuredModel) {
@@ -891,7 +927,7 @@ async function evaluateAutoAcceptCommand(
       model,
       {
         systemPrompt: "You are a strict bash security reviewer. Output JSON only.",
-        messages: [{ role: "user", content: buildAutoAcceptPrompt(ctx.cwd, command), timestamp: Date.now() }],
+        messages: [{ role: "user", content: buildAutoAcceptPrompt(ctx.cwd, command, strictness), timestamp: Date.now() }],
       },
       {
         apiKey,
@@ -1428,6 +1464,7 @@ export default function (pi: ExtensionAPI) {
         enabled?: boolean;
         model?: string;
         timeoutMs?: number;
+        strictness?: AutoAcceptStrictness;
         neverAllowPatterns?: string[];
       };
     };
@@ -1512,13 +1549,19 @@ export default function (pi: ExtensionAPI) {
     const autoAcceptEnabled = autoAcceptSessionOverride
       ? autoAcceptSessionOverride === "on"
       : autoAcceptEnabledByConfig;
+    const autoAcceptStrictnessByConfig = normalizeAutoAcceptStrictness(config.autoAccept?.strictness);
+    const autoAcceptStrictnessSessionOverride = getAutoAcceptStrictnessSessionOverride(ctx);
+    const autoAcceptStrictness = autoAcceptStrictnessSessionOverride ?? autoAcceptStrictnessByConfig;
 
     if (autoAcceptSessionOverride) {
       debugNotify(ctx, settings, `auto-accept session override active: ${autoAcceptSessionOverride}`);
     }
+    if (autoAcceptStrictnessSessionOverride) {
+      debugNotify(ctx, settings, `auto-accept strictness session override active: ${autoAcceptStrictnessSessionOverride}`);
+    }
 
     if (autoAcceptEnabled && !matchesNeverAllowPattern) {
-      const autoAccept = await evaluateAutoAcceptCommand(command, ctx, settings);
+      const autoAccept = await evaluateAutoAcceptCommand(command, ctx, settings, autoAcceptStrictness);
       if (autoAccept.result) {
         if (autoAccept.result.decision === "allow") {
           debugNotify(
@@ -1759,8 +1802,11 @@ export default function (pi: ExtensionAPI) {
         const autoAcceptEnabledByConfig = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
         const autoAcceptModel = getSetting(settings, "bashConfirm.autoAccept.model", "");
         const autoAcceptTimeoutMs = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
+        const autoAcceptStrictnessByConfig = normalizeAutoAcceptStrictness(getSetting(settings, "bashConfirm.autoAccept.strictness", "strict"));
         const autoAcceptNeverAllowPatterns = getSetting(settings, "bashConfirm.autoAccept.neverAllowPatterns", []) as string[];
         const autoAcceptSessionOverride = getAutoAcceptSessionOverride(ctx);
+        const autoAcceptStrictnessSessionOverride = getAutoAcceptStrictnessSessionOverride(ctx);
+        const autoAcceptStrictnessEffective = autoAcceptStrictnessSessionOverride ?? autoAcceptStrictnessByConfig;
         const autoAcceptEffective = autoAcceptSessionOverride
           ? autoAcceptSessionOverride === "on"
           : autoAcceptEnabledByConfig;
@@ -1771,11 +1817,15 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`safeCommands: [${safeCommands.join(", ") || "(none)"}]`, "info");
         ctx.ui.notify(`blockedCommands: [${blockedCommands.join(", ") || "(none)"}]`, "info");
         ctx.ui.notify(
-          `autoAccept: configEnabled=${autoAcceptEnabledByConfig}, effectiveEnabled=${autoAcceptEffective}, model=${autoAcceptModel || "(current model)"}, timeoutMs=${autoAcceptTimeoutMs}`,
+          `autoAccept: configEnabled=${autoAcceptEnabledByConfig}, effectiveEnabled=${autoAcceptEffective}, strictness(config=${autoAcceptStrictnessByConfig}, effective=${autoAcceptStrictnessEffective}), model=${autoAcceptModel || "(current model)"}, timeoutMs=${autoAcceptTimeoutMs}`,
           "info",
         );
         ctx.ui.notify(
           `autoAccept.sessionOverride: ${autoAcceptSessionOverride || "(none)"}`,
+          "info",
+        );
+        ctx.ui.notify(
+          `autoAccept.strictnessSessionOverride: ${autoAcceptStrictnessSessionOverride || "(none)"}`,
           "info",
         );
         ctx.ui.notify(
@@ -1816,20 +1866,55 @@ export default function (pi: ExtensionAPI) {
         const autoEnabledByConfig = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
         const autoModel = getSetting(settings, "bashConfirm.autoAccept.model", "");
         const autoTimeoutMs = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
+        const autoStrictnessByConfig = normalizeAutoAcceptStrictness(getSetting(settings, "bashConfirm.autoAccept.strictness", "strict"));
         const autoNeverAllowPatterns = getSetting(settings, "bashConfirm.autoAccept.neverAllowPatterns", []) as string[];
         const autoSessionOverride = getAutoAcceptSessionOverride(ctx);
+        const autoStrictnessSessionOverride = getAutoAcceptStrictnessSessionOverride(ctx);
         const autoEffectiveEnabled = autoSessionOverride ? autoSessionOverride === "on" : autoEnabledByConfig;
+        const autoEffectiveStrictness = autoStrictnessSessionOverride ?? autoStrictnessByConfig;
 
         if (!autoArgs || autoArgs === "status") {
           ctx.ui.notify(`auto-accept config enabled: ${autoEnabledByConfig}`, "info");
           ctx.ui.notify(`auto-accept effective enabled: ${autoEffectiveEnabled}`, "info");
           ctx.ui.notify(`auto-accept session override: ${autoSessionOverride || "(none)"}`, "info");
           ctx.ui.notify(`auto-accept model: ${autoModel || "(current model)"}`, "info");
+          ctx.ui.notify(`auto-accept strictness config: ${autoStrictnessByConfig}`, "info");
+          ctx.ui.notify(`auto-accept strictness effective: ${autoEffectiveStrictness}`, "info");
+          ctx.ui.notify(`auto-accept strictness session override: ${autoStrictnessSessionOverride || "(none)"}`, "info");
           ctx.ui.notify(`auto-accept timeoutMs: ${autoTimeoutMs}`, "info");
           ctx.ui.notify(
             `auto-accept neverAllowPatterns: [${autoNeverAllowPatterns.join(", ") || "(none)"}]`,
             "info",
           );
+          return;
+        }
+
+        if (autoArgs === "strictness" || autoArgs.startsWith("strictness ")) {
+          const strictnessArgs = autoArgs.slice("strictness".length).trim().toLowerCase();
+
+          if (!strictnessArgs || strictnessArgs === "status") {
+            const override = getAutoAcceptStrictnessSessionOverride(ctx);
+            const effective = override ?? autoStrictnessByConfig;
+            ctx.ui.notify(`auto-accept strictness config: ${autoStrictnessByConfig}`, "info");
+            ctx.ui.notify(`auto-accept strictness effective: ${effective}`, "info");
+            ctx.ui.notify(`auto-accept strictness session override: ${override || "(none)"}`, "info");
+            return;
+          }
+
+          if (strictnessArgs === "strict" || strictnessArgs === "permissive") {
+            setAutoAcceptStrictnessSessionOverride(ctx, strictnessArgs);
+            ctx.ui.notify(`Set auto-accept strictness session override: ${strictnessArgs}`, "success");
+            return;
+          }
+
+          if (strictnessArgs === "clear" || strictnessArgs === "reset" || strictnessArgs === "default") {
+            clearAutoAcceptStrictnessSessionOverride(ctx);
+            ctx.ui.notify("Cleared auto-accept strictness session override", "success");
+            ctx.ui.notify(`auto-accept strictness effective: ${autoStrictnessByConfig}`, "info");
+            return;
+          }
+
+          ctx.ui.notify("Usage: /bash-confirm auto-accept strictness [status|strict|permissive|clear]", "info");
           return;
         }
 
@@ -1875,7 +1960,7 @@ export default function (pi: ExtensionAPI) {
             return;
           }
 
-          const evaluated = await evaluateAutoAcceptCommand(testCommand, ctx, settings);
+          const evaluated = await evaluateAutoAcceptCommand(testCommand, ctx, settings, autoEffectiveStrictness);
           if (evaluated.result) {
             ctx.ui.notify(
               `auto-accept (${evaluated.result.modelRef}): ${evaluated.result.decision} — ${evaluated.result.reason}`,
@@ -1887,7 +1972,7 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        ctx.ui.notify("Usage: /bash-confirm auto-accept [status|session [status|on|off|clear]|test <command>]", "info");
+        ctx.ui.notify("Usage: /bash-confirm auto-accept [status|strictness [status|strict|permissive|clear]|session [status|on|off|clear]|test <command>]", "info");
         return;
       }
 
