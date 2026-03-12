@@ -342,7 +342,8 @@ Working directory: /home/user/project
 - **Always Accept (Exact)** (2): Add an exact-match command whitelist entry
 - **Always Accept (Generic)** (3): The dialog always shows the generated regex preview; selecting this lets you review/edit and whitelist it
 - **Edit** (4): Open an editor to modify the command before approval
-- **Block** (5 or ESC): Cancel the command execution
+- **Block** (5): Cancel the command execution
+- **Cancel** (ESC): Dismiss the dialog and cancel the command execution
 
 You can quickly select an option by pressing its number (1-5) on your keyboard, or use arrow keys and Enter.
 

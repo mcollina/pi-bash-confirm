@@ -1635,7 +1635,7 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         if (data === "\u001B") { // Escape
-          done("block");
+          done("cancel");
         }
       }
 
@@ -1751,6 +1751,9 @@ export default function (pi: ExtensionAPI) {
 
         return undefined; // Execute normally
       }
+      case "cancel":
+        debugNotify(ctx, settings, "User cancelled confirmation dialog via ESC");
+        return await blockAndStop(ctx, command, "Confirmation cancelled by user", pi);
       case "block":
         debugNotify(ctx, settings, "User blocked command");
         return await blockAndStop(ctx, command, "Blocked by user", pi);
