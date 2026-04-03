@@ -912,7 +912,11 @@ async function evaluateAutoAcceptCommand(
   }
 
   const modelRef = `${model.provider}/${model.id}`;
-  const apiKey = await ctx.modelRegistry.getApiKey(model);
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  if (!auth.ok) {
+    return { error: auth.error };
+  }
+
   const timeoutMsRaw = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
   const timeoutMsNumber = Number(timeoutMsRaw);
   const timeoutMs = Number.isFinite(timeoutMsNumber)
@@ -930,7 +934,8 @@ async function evaluateAutoAcceptCommand(
         messages: [{ role: "user", content: buildAutoAcceptPrompt(ctx.cwd, command, strictness), timestamp: Date.now() }],
       },
       {
-        apiKey,
+        apiKey: auth.apiKey,
+        headers: auth.headers,
         reasoning: "minimal",
         maxTokens: 120,
         signal: timeoutController.signal,

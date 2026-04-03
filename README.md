@@ -15,6 +15,8 @@ A [pi](https://github.com/mariozechner/pi) package that adds a confirmation dial
 
 ## Installation
 
+Requires pi / `@mariozechner/pi-coding-agent` `0.63.0` or newer.
+
 ```bash
 pi install npm:pi-bash-confirm
 ```
