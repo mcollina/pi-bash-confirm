@@ -766,6 +766,7 @@ function parseModelReference(ref: string): { provider: string; modelId: string }
 }
 
 function normalizeAutoAcceptStrictness(value: unknown): AutoAcceptStrictness {
+  if (value === undefined) return "permissive";
   if (typeof value !== "string") return "strict";
   const normalized = value.trim().toLowerCase();
   return normalized === "permissive" ? "permissive" : "strict";
@@ -782,6 +783,7 @@ function buildAutoAcceptPrompt(cwd: string, command: string, strictness: AutoAcc
   const permissivePolicy = [
     "- allow all strict-mode allow cases.",
     "- allow low-risk local developer write operations inside the working tree when intent is clear and bounded (for example: git commit/amend, eslint --fix, prettier --write, test snapshot updates, local build output generation).",
+    "- allow writing files under /tmp and executing local files or scripts from /tmp when intent is clear, bounded, and otherwise low-risk.",
     "- review for high-risk operations: history rewrites beyond commit/amend (rebase/reset), remote or publishing actions (push/publish/deploy/release), destructive deletes, privilege escalation, broad permission/ownership changes, remote execution, or uncertainty.",
     "- for command chains, choose review if any segment is high-risk or unclear.",
   ];
@@ -892,7 +894,7 @@ async function evaluateAutoAcceptCommand(
   strictnessOverride?: AutoAcceptStrictness,
 ): Promise<{ result?: AutoAcceptResult; error?: string }> {
   const configuredModel = (getSetting(settings, "bashConfirm.autoAccept.model", "") as string).trim();
-  const strictness = strictnessOverride ?? normalizeAutoAcceptStrictness(getSetting(settings, "bashConfirm.autoAccept.strictness", "strict"));
+  const strictness = strictnessOverride ?? normalizeAutoAcceptStrictness(getSetting(settings, "bashConfirm.autoAccept.strictness", "permissive"));
 
   let model = ctx.model;
   if (configuredModel) {
@@ -1810,7 +1812,7 @@ export default function (pi: ExtensionAPI) {
         const autoAcceptEnabledByConfig = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
         const autoAcceptModel = getSetting(settings, "bashConfirm.autoAccept.model", "");
         const autoAcceptTimeoutMs = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
-        const autoAcceptStrictnessByConfig = normalizeAutoAcceptStrictness(getSetting(settings, "bashConfirm.autoAccept.strictness", "strict"));
+        const autoAcceptStrictnessByConfig = normalizeAutoAcceptStrictness(getSetting(settings, "bashConfirm.autoAccept.strictness", "permissive"));
         const autoAcceptNeverAllowPatterns = getSetting(settings, "bashConfirm.autoAccept.neverAllowPatterns", []) as string[];
         const autoAcceptSessionOverride = getAutoAcceptSessionOverride(ctx);
         const autoAcceptStrictnessSessionOverride = getAutoAcceptStrictnessSessionOverride(ctx);
@@ -1874,7 +1876,7 @@ export default function (pi: ExtensionAPI) {
         const autoEnabledByConfig = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
         const autoModel = getSetting(settings, "bashConfirm.autoAccept.model", "");
         const autoTimeoutMs = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
-        const autoStrictnessByConfig = normalizeAutoAcceptStrictness(getSetting(settings, "bashConfirm.autoAccept.strictness", "strict"));
+        const autoStrictnessByConfig = normalizeAutoAcceptStrictness(getSetting(settings, "bashConfirm.autoAccept.strictness", "permissive"));
         const autoNeverAllowPatterns = getSetting(settings, "bashConfirm.autoAccept.neverAllowPatterns", []) as string[];
         const autoSessionOverride = getAutoAcceptSessionOverride(ctx);
         const autoStrictnessSessionOverride = getAutoAcceptStrictnessSessionOverride(ctx);

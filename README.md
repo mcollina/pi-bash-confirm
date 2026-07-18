@@ -46,7 +46,7 @@ Create or edit `~/.pi/agent/settings.json` (global) or `.pi/settings.json` (proj
       "enabled": false,
       "model": "openrouter/google/gemini-2.0-flash-001",
       "timeoutMs": 5000,
-      "strictness": "strict"
+      "strictness": "permissive"
     }
   }
 }
@@ -126,7 +126,7 @@ View your current configuration:
 | `autoAccept.enabled` | boolean | `false` | Enable optional model-based auto-accept decision flow |
 | `autoAccept.model` | string | `""` | Model reference (`provider/modelId`) used for auto-accept; falls back to current model when empty |
 | `autoAccept.timeoutMs` | number | `5000` | Timeout for auto-accept model request (clamped to 1000-20000 ms) |
-| `autoAccept.strictness` | string | `"strict"` | Auto-accept policy mode: `strict` (narrow) or `permissive` (broader local dev writes allowed) |
+| `autoAccept.strictness` | string | `"permissive"` | Auto-accept policy mode: `strict` (narrow) or `permissive` (broader local dev writes allowed) |
 | `autoAccept.neverAllowPatterns` | string[] | `[]` | Regex patterns that must always require manual confirmation (auto-accept is skipped) |
 
 ### Notification Options
@@ -443,7 +443,7 @@ Example:
       "enabled": true,
       "model": "openrouter/google/gemini-2.0-flash-001",
       "timeoutMs": 4000,
-      "strictness": "strict",
+      "strictness": "permissive",
       "neverAllowPatterns": [
         "^git\\s+push(?:\\s|$)",
         "^npm\\s+publish(?:\\s|$)"
