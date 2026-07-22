@@ -41,7 +41,9 @@
     "node": ">=20.0.0"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": ">=0.63.0"
+    "@earendil-works/pi-ai": "^0.80.0",
+    "@earendil-works/pi-coding-agent": "^0.80.0",
+    "@earendil-works/pi-tui": "^0.80.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

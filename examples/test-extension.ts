@@ -5,7 +5,7 @@
  * and provides utility commands for testing its functionality.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("test-bash-confirm", {
@@ -121,8 +121,7 @@ export default function (pi: ExtensionAPI) {
 
       ctx.ui.notify("", "info");
       ctx.ui.notify("Demo complete!", "success");
-      ctx.ui.notify("Run /bash-confirm test-notify to test notifications.", "dim");
-      ctx.ui.notify("Run /bash-confirm debug to check configuration.", "dim");
+      ctx.ui.notify("Run /bash-confirm to open the session settings panel.", "dim");
     },
   });
 

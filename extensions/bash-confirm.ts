@@ -1,6 +1,6 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { completeSimple } from "@mariozechner/pi-ai";
-import { wrapTextWithAnsi } from "@mariozechner/pi-tui";
+import { getSettingsListTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
+import { Container, type SettingItem, SettingsList, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import https from "node:https";
 import { splitCommand } from "./command-splitter.ts";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -83,8 +83,6 @@ function getAgentDir(): string {
 
 function loadMergedSettings(cwd: string, ctx?: ExtensionContext): {
   settings: JsonObject;
-  globalSettingsPath: string;
-  projectSettingsPath: string;
 } {
   const globalSettingsPath = join(getAgentDir(), "settings.json");
   const projectSettingsPath = join(cwd, ".pi", "settings.json");
@@ -94,8 +92,6 @@ function loadMergedSettings(cwd: string, ctx?: ExtensionContext): {
 
   return {
     settings: deepMerge(globalSettings, projectSettings),
-    globalSettingsPath,
-    projectSettingsPath,
   };
 }
 
@@ -115,24 +111,6 @@ function debugNotify(ctx: ExtensionContext, settings: JsonObject, message: strin
   const debugEnabled = getSetting(settings, "bashConfirm.debug", false);
   if (!debugEnabled) return;
   ctx.ui.notify(`[bash-confirm debug] ${message}`, "info");
-}
-
-function maskToken(token: string): string {
-  if (!token) return "(missing)";
-  if (token.length <= 10) return "(present)";
-  return `${token.slice(0, 4)}…${token.slice(-4)}`;
-}
-
-function coerceChatId(chatId: unknown): string | number | undefined {
-  if (typeof chatId === "number") return chatId;
-  if (typeof chatId === "string") {
-    const trimmed = chatId.trim();
-    if (!trimmed) return undefined;
-    const asNum = Number(trimmed);
-    if (Number.isFinite(asNum) && String(asNum) === trimmed) return asNum;
-    return trimmed;
-  }
-  return undefined;
 }
 
 function formatNetworkError(error: unknown): string {
@@ -428,28 +406,6 @@ function addPatternToWhitelist(cwd: string, pattern: string, note?: string, sour
   return addWhitelistEntry(cwd, { type: "pattern", value: pattern, note, source });
 }
 
-function removeFromWhitelist(cwd: string, value: string): boolean {
-  const trimmed = value.trim();
-  if (!trimmed) return false;
-
-  const whitelist = loadWhitelist(cwd);
-  const nextEntries = whitelist.entries.filter(entry => entry.value !== trimmed);
-  if (nextEntries.length === whitelist.entries.length) {
-    return false;
-  }
-
-  whitelist.entries = nextEntries;
-  saveWhitelist(cwd, whitelist);
-  return true;
-}
-
-function formatWhitelistEntry(entry: WhitelistEntry, index: number): string {
-  const date = new Date(entry.addedAt).toLocaleString();
-  const note = entry.note ? ` (${entry.note})` : "";
-  const source = entry.source ? ` [source: ${entry.source}]` : "";
-  return `${index + 1}. [${entry.type}] ${escapeHtml(entry.value)}${escapeHtml(note)}${escapeHtml(source)}\n   Added: ${date}`;
-}
-
 function matchesRegexList(input: string, patterns: string[] | undefined): boolean {
   if (!patterns || patterns.length === 0) return false;
   for (const pattern of patterns) {
@@ -477,41 +433,6 @@ function compileWhitelistPatterns(entries: WhitelistEntry[]): RegExp[] {
   return compiled;
 }
 
-function parseValueAndNote(input: string): { value: string; note?: string } {
-  const marker = " --note ";
-  const markerIndex = input.indexOf(marker);
-  if (markerIndex === -1) {
-    return { value: input.trim() };
-  }
-
-  const value = input.slice(0, markerIndex).trim();
-  const note = input.slice(markerIndex + marker.length).trim() || undefined;
-  return { value, note };
-}
-
-type WhitelistAnalysisSnapshot = {
-  exactEntries: string[];
-  patternEntries: string[];
-  exactCoveredByPattern: Array<{ command: string; matchingPatterns: string[] }>;
-  prefixGroups: Array<{ prefix: string; commands: string[] }>;
-};
-
-type PendingGeneralizationRequest = {
-  cwd: string;
-  whitelistFingerprint: string;
-};
-
-type AiGeneralizationPlan = {
-  addPatterns: Array<{ pattern: string; note?: string }>;
-  removeExact: string[];
-};
-
-type AppliedGeneralizationResult = {
-  addedPatterns: string[];
-  removedExact: string[];
-  skipped: string[];
-};
-
 type AutoAcceptDecision = "allow" | "review";
 type AutoAcceptStrictness = "strict" | "permissive";
 
@@ -521,11 +442,11 @@ type AutoAcceptResult = {
   modelRef: string;
 };
 
-const GENERALIZE_MARKER = "[BASH_CONFIRM_GENERALIZE_V1]";
 const AUTO_ACCEPT_MARKER = "[BASH_CONFIRM_AUTO_ACCEPT_V1]";
-let pendingGeneralizationRequest: PendingGeneralizationRequest | undefined;
 
+type BashConfirmSessionOverride = "on" | "off";
 type AutoAcceptSessionOverride = "on" | "off";
+const bashConfirmSessionOverrides = new Map<string, BashConfirmSessionOverride>();
 const autoAcceptSessionOverrides = new Map<string, AutoAcceptSessionOverride>();
 const autoAcceptStrictnessSessionOverrides = new Map<string, AutoAcceptStrictness>();
 
@@ -536,6 +457,25 @@ function getSessionOverrideKey(ctx: ExtensionContext): string {
   return `${ctx.cwd}::${sessionId}`;
 }
 
+function getBashConfirmSessionOverride(ctx: ExtensionContext): BashConfirmSessionOverride | undefined {
+  return bashConfirmSessionOverrides.get(getSessionOverrideKey(ctx));
+}
+
+function setBashConfirmSessionOverride(ctx: ExtensionContext, mode: BashConfirmSessionOverride): void {
+  bashConfirmSessionOverrides.set(getSessionOverrideKey(ctx), mode);
+}
+
+function getBashConfirmEnabledState(ctx: ExtensionContext, settings: JsonObject): {
+  configEnabled: boolean;
+  sessionOverride?: BashConfirmSessionOverride;
+  effectiveEnabled: boolean;
+} {
+  const configEnabled = getSetting<boolean>(settings, "bashConfirm.enabled", true) !== false;
+  const sessionOverride = getBashConfirmSessionOverride(ctx);
+  const effectiveEnabled = sessionOverride ? sessionOverride === "on" : configEnabled;
+  return { configEnabled, sessionOverride, effectiveEnabled };
+}
+
 function getAutoAcceptSessionOverride(ctx: ExtensionContext): AutoAcceptSessionOverride | undefined {
   return autoAcceptSessionOverrides.get(getSessionOverrideKey(ctx));
 }
@@ -544,113 +484,12 @@ function setAutoAcceptSessionOverride(ctx: ExtensionContext, mode: AutoAcceptSes
   autoAcceptSessionOverrides.set(getSessionOverrideKey(ctx), mode);
 }
 
-function clearAutoAcceptSessionOverride(ctx: ExtensionContext): void {
-  autoAcceptSessionOverrides.delete(getSessionOverrideKey(ctx));
-}
-
 function getAutoAcceptStrictnessSessionOverride(ctx: ExtensionContext): AutoAcceptStrictness | undefined {
   return autoAcceptStrictnessSessionOverrides.get(getSessionOverrideKey(ctx));
 }
 
 function setAutoAcceptStrictnessSessionOverride(ctx: ExtensionContext, strictness: AutoAcceptStrictness): void {
   autoAcceptStrictnessSessionOverrides.set(getSessionOverrideKey(ctx), strictness);
-}
-
-function clearAutoAcceptStrictnessSessionOverride(ctx: ExtensionContext): void {
-  autoAcceptStrictnessSessionOverrides.delete(getSessionOverrideKey(ctx));
-}
-
-function buildWhitelistAnalysisSnapshot(entries: WhitelistEntry[]): WhitelistAnalysisSnapshot {
-  const exactEntries = entries
-    .filter(entry => entry.type === "exact")
-    .map(entry => entry.value)
-    .filter(Boolean);
-
-  const patternEntries = entries
-    .filter(entry => entry.type === "pattern")
-    .map(entry => entry.value)
-    .filter(Boolean);
-
-  const exactCoveredByPattern = exactEntries
-    .map(command => {
-      const matchingPatterns = patternEntries.filter(pattern => {
-        try {
-          return new RegExp(pattern).test(command);
-        } catch {
-          return false;
-        }
-      });
-      return { command, matchingPatterns };
-    })
-    .filter(item => item.matchingPatterns.length > 0)
-    .slice(0, 40);
-
-  const byPrefix = new Map<string, string[]>();
-  for (const command of exactEntries) {
-    const tokens = tokenizeCommand(command);
-    const key = tokens.slice(0, 2).join(" ").trim() || tokens[0] || command;
-    const group = byPrefix.get(key);
-    if (group) {
-      group.push(command);
-    } else {
-      byPrefix.set(key, [command]);
-    }
-  }
-
-  const prefixGroups = [...byPrefix.entries()]
-    .map(([prefix, commands]) => ({ prefix, commands }))
-    .filter(group => group.commands.length >= 2)
-    .sort((a, b) => b.commands.length - a.commands.length)
-    .slice(0, 30);
-
-  // Keep response bounded for AI context.
-  return {
-    exactEntries: exactEntries.slice(0, 200),
-    patternEntries: patternEntries.slice(0, 200),
-    exactCoveredByPattern,
-    prefixGroups,
-  };
-}
-
-function buildWhitelistFingerprint(whitelist: WhitelistData): string {
-  const normalized = whitelist.entries
-    .map(entry => `${entry.type}:${entry.value}`)
-    .sort()
-    .join("\n");
-  return `${whitelist.version}:${normalized}`;
-}
-
-function buildAiGeneralizationPrompt(cwd: string, whitelist: WhitelistData): string {
-  const snapshot = buildWhitelistAnalysisSnapshot(whitelist.entries);
-
-  return [
-    GENERALIZE_MARKER,
-    "You are reviewing a bash command permission whitelist for overlap and generalization opportunities.",
-    "",
-    "Goal:",
-    "- Recommend safe regex pattern entries that can replace multiple exact entries.",
-    "- Flag redundant exact entries already covered by existing patterns.",
-    "- Be conservative: avoid broad patterns, avoid using .* unless strictly scoped.",
-    "",
-    "Safety constraints:",
-    "- Anchor all patterns with ^ and $",
-    "- Prefer explicit token classes like [\\w./-]+, \\d+, or fixed literals",
-    "- Do not suggest patterns equivalent to ^.*$ or ^.+$",
-    "",
-    "Return ONLY valid JSON with this exact shape:",
-    '{"summary":["..."],"addPatterns":[{"pattern":"^...$","note":"..."}],"removeExact":["exact command"]}',
-    "",
-    `Project directory: ${cwd}`,
-    `Whitelist version: ${whitelist.version}`,
-    `Total entries: ${whitelist.entries.length}`,
-    `Exact entries: ${snapshot.exactEntries.length}`,
-    `Pattern entries: ${snapshot.patternEntries.length}`,
-    "",
-    "Whitelist analysis snapshot (JSON):",
-    "```json",
-    JSON.stringify(snapshot, null, 2),
-    "```",
-  ].join("\n");
 }
 
 function extractFirstJsonObject(text: string): string | undefined {
@@ -701,55 +540,6 @@ function extractFirstJsonObject(text: string): string | undefined {
   }
 
   return undefined;
-}
-
-function parseAiGeneralizationPlan(text: string): { plan?: AiGeneralizationPlan; error?: string } {
-  const jsonText = extractFirstJsonObject(text);
-  if (!jsonText) {
-    return { error: "No JSON object found in AI response" };
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonText);
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { error: `Failed to parse AI JSON: ${message}` };
-  }
-
-  if (!isPlainObject(parsed)) {
-    return { error: "AI response JSON must be an object" };
-  }
-
-  const addPatternsRaw = parsed.addPatterns;
-  const removeExactRaw = parsed.removeExact;
-
-  const addPatterns: Array<{ pattern: string; note?: string }> = [];
-  if (Array.isArray(addPatternsRaw)) {
-    for (const item of addPatternsRaw) {
-      if (typeof item === "string") {
-        const pattern = item.trim();
-        if (pattern) addPatterns.push({ pattern });
-        continue;
-      }
-      if (isPlainObject(item) && typeof item.pattern === "string") {
-        const pattern = item.pattern.trim();
-        if (!pattern) continue;
-        const note = typeof item.note === "string" && item.note.trim() ? item.note.trim() : undefined;
-        addPatterns.push({ pattern, note });
-      }
-    }
-  }
-
-  const removeExact = Array.isArray(removeExactRaw)
-    ? removeExactRaw.filter((item): item is string => typeof item === "string").map(item => item.trim()).filter(Boolean)
-    : [];
-
-  if (addPatterns.length === 0 && removeExact.length === 0) {
-    return { error: "AI plan contains no actionable changes" };
-  }
-
-  return { plan: { addPatterns, removeExact } };
 }
 
 function parseModelReference(ref: string): { provider: string; modelId: string } | undefined {
@@ -938,6 +728,7 @@ async function evaluateAutoAcceptCommand(
       {
         apiKey: auth.apiKey,
         headers: auth.headers,
+        env: auth.env,
         reasoning: "minimal",
         maxTokens: 120,
         signal: timeoutController.signal,
@@ -981,122 +772,6 @@ async function evaluateAutoAcceptCommand(
     return { error: `Auto-accept model request failed: ${message}` };
   } finally {
     clearTimeout(timeoutHandle);
-  }
-}
-
-function extractLastAssistantText(messages: unknown[]): string | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i] as any;
-    if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
-
-    const text = message.content
-      .filter((content: any) => content?.type === "text" && typeof content.text === "string")
-      .map((content: any) => content.text)
-      .join("")
-      .trim();
-
-    if (text) return text;
-  }
-  return undefined;
-}
-
-function applyAiGeneralizationPlan(cwd: string, plan: AiGeneralizationPlan): AppliedGeneralizationResult {
-  const whitelist = loadWhitelist(cwd);
-
-  const existingPatternSet = new Set(
-    whitelist.entries
-      .filter(entry => entry.type === "pattern")
-      .map(entry => entry.value)
-  );
-  const existingExactSet = new Set(
-    whitelist.entries
-      .filter(entry => entry.type === "exact")
-      .map(entry => entry.value)
-  );
-
-  const addedPatterns: string[] = [];
-  const skipped: string[] = [];
-
-  for (const candidate of plan.addPatterns) {
-    const pattern = candidate.pattern.trim();
-    if (!pattern) continue;
-
-    const validation = validateWhitelistPattern(pattern);
-    if (validation.ok === false) {
-      skipped.push(`Skipped invalid pattern ${pattern}: ${validation.reason}`);
-      continue;
-    }
-
-    if (existingPatternSet.has(pattern)) {
-      skipped.push(`Pattern already exists: ${pattern}`);
-      continue;
-    }
-
-    existingPatternSet.add(pattern);
-    addedPatterns.push(pattern);
-  }
-
-  const coverageRegexes: RegExp[] = [];
-  for (const pattern of existingPatternSet) {
-    try {
-      coverageRegexes.push(new RegExp(pattern));
-    } catch {
-      // Ignore invalid regexes
-    }
-  }
-
-  const removeSet = new Set<string>();
-  for (const command of plan.removeExact) {
-    const trimmed = command.trim();
-    if (!trimmed) continue;
-
-    if (!existingExactSet.has(trimmed)) {
-      skipped.push(`Exact entry not found: ${trimmed}`);
-      continue;
-    }
-
-    const isCovered = coverageRegexes.some(regex => regex.test(trimmed));
-    if (!isCovered) {
-      skipped.push(`Not removed (not covered by a pattern): ${trimmed}`);
-      continue;
-    }
-
-    removeSet.add(trimmed);
-  }
-
-  const removedExact: string[] = [];
-  const nextEntries = whitelist.entries.filter(entry => {
-    if (entry.type === "exact" && removeSet.has(entry.value)) {
-      removedExact.push(entry.value);
-      return false;
-    }
-    return true;
-  });
-
-  for (const pattern of addedPatterns) {
-    nextEntries.push({
-      type: "pattern",
-      value: pattern,
-      note: "AI suggest-generalize",
-      source: "ai",
-      addedAt: new Date().toISOString(),
-    });
-  }
-
-  if (addedPatterns.length > 0 || removedExact.length > 0) {
-    saveWhitelist(cwd, { version: 2, entries: nextEntries });
-  }
-
-  return { addedPatterns, removedExact, skipped };
-}
-
-function queueAiGeneralizationReview(pi: ExtensionAPI, ctx: ExtensionContext, whitelist: WhitelistData): void {
-  const prompt = buildAiGeneralizationPrompt(ctx.cwd, whitelist);
-
-  if (ctx.isIdle() === true) {
-    pi.sendUserMessage(prompt);
-  } else {
-    pi.sendUserMessage(prompt, { deliverAs: "followUp" });
   }
 }
 
@@ -1402,63 +1077,6 @@ async function blockAndStop(
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on("agent_end", async (event, ctx) => {
-    const pending = pendingGeneralizationRequest;
-    if (!pending) return;
-
-    if (pending.cwd !== ctx.cwd) return;
-
-    pendingGeneralizationRequest = undefined;
-
-    const currentWhitelist = loadWhitelist(ctx.cwd);
-    const currentFingerprint = buildWhitelistFingerprint(currentWhitelist);
-    if (currentFingerprint !== pending.whitelistFingerprint) {
-      ctx.ui.notify("Whitelist changed while AI was analyzing; not auto-applying recommendations.", "warning");
-      return;
-    }
-
-    const assistantText = extractLastAssistantText(event.messages as unknown[]);
-    if (!assistantText) {
-      ctx.ui.notify("AI generalization response had no text output.", "warning");
-      return;
-    }
-
-    const parsed = parseAiGeneralizationPlan(assistantText);
-    if (!parsed.plan) {
-      ctx.ui.notify(`Could not apply AI recommendations: ${parsed.error}`, "warning");
-      return;
-    }
-
-    if (ctx.hasUI === true) {
-      const shouldApply = await ctx.ui.confirm(
-        "Apply AI whitelist recommendations?",
-        `Add patterns: ${parsed.plan.addPatterns.length}\nRemove exact entries: ${parsed.plan.removeExact.length}`,
-      );
-      if (shouldApply !== true) {
-        ctx.ui.notify("Skipped applying AI recommendations.", "info");
-        return;
-      }
-    }
-
-    const applied = applyAiGeneralizationPlan(ctx.cwd, parsed.plan);
-    if (applied.addedPatterns.length === 0 && applied.removedExact.length === 0) {
-      ctx.ui.notify("AI recommendations produced no safe whitelist changes.", "warning");
-      if (applied.skipped.length > 0) {
-        ctx.ui.notify(applied.skipped.slice(0, 3).join(" | "), "info");
-      }
-      return;
-    }
-
-    ctx.ui.notify(
-      `Applied AI recommendations: +${applied.addedPatterns.length} pattern(s), -${applied.removedExact.length} exact entry(ies).`,
-      "success",
-    );
-
-    if (applied.skipped.length > 0) {
-      ctx.ui.notify(`Skipped ${applied.skipped.length} recommendation(s).`, "info");
-    }
-  });
-
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName !== "bash") return undefined;
 
@@ -1476,9 +1094,18 @@ export default function (pi: ExtensionAPI) {
       };
     };
 
-    if (!config.enabled) {
-      debugNotify(ctx, settings, "Extension disabled (bashConfirm.enabled = false)");
+    const bashConfirmState = getBashConfirmEnabledState(ctx, settings);
+    if (!bashConfirmState.effectiveEnabled) {
+      debugNotify(
+        ctx,
+        settings,
+        `Extension disabled (configEnabled=${bashConfirmState.configEnabled}, sessionOverride=${bashConfirmState.sessionOverride || "none"})`,
+      );
       return undefined;
+    }
+
+    if (bashConfirmState.sessionOverride) {
+      debugNotify(ctx, settings, `bash-confirm session override active: ${bashConfirmState.sessionOverride}`);
     }
 
     const command = event.input.command as string;
@@ -1782,336 +1409,80 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // Command to manage settings and test notifications
   pi.registerCommand("bash-confirm", {
-    description: "Manage bash confirmation settings and test notifications",
-    handler: async (args, ctx) => {
-      const { settings, globalSettingsPath, projectSettingsPath } = loadMergedSettings(ctx.cwd, ctx);
-
-      const cmd = args.trim();
-
-      if (cmd === "test-notify") {
-        await sendBlockedNotification(ctx, "test-command --dry-run", "Test notification from /bash-confirm test-notify", pi);
-        ctx.ui.notify("Test notification sent!", "info");
+    description: "Configure bash confirmation",
+    handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("/bash-confirm requires TUI mode", "error");
         return;
       }
 
-      if (cmd === "debug") {
-        const enabled = getSetting(settings, "bashConfirm.enabled", true);
-        const debugEnabled = getSetting(settings, "bashConfirm.debug", false);
-        const notifyEnabled = getSetting(settings, "bashConfirm.notifications.enabled", false);
-        const onShown = getSetting(settings, "bashConfirm.notifications.onShown", false);
-        const onBlocked = getSetting(settings, "bashConfirm.notifications.onBlocked", false);
-        const onModified = getSetting(settings, "bashConfirm.notifications.onModified", false);
-        const token = getSetting(settings, "bashConfirm.notifications.telegram.token", "");
-        const chatId = getSetting(settings, "bashConfirm.notifications.telegram.chatId", "");
-        const timeoutMs = getSetting(settings, "bashConfirm.notifications.telegram.timeoutMs", 5000);
-        const forceIpv4 = getSetting(settings, "bashConfirm.notifications.telegram.forceIpv4", true);
-        const safeCommands = getSetting(settings, "bashConfirm.safeCommands", []) as string[];
-        const blockedCommands = getSetting(settings, "bashConfirm.blockedCommands", []) as string[];
-        const autoAcceptEnabledByConfig = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
-        const autoAcceptModel = getSetting(settings, "bashConfirm.autoAccept.model", "");
-        const autoAcceptTimeoutMs = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
-        const autoAcceptStrictnessByConfig = normalizeAutoAcceptStrictness(getSetting(settings, "bashConfirm.autoAccept.strictness", "permissive"));
-        const autoAcceptNeverAllowPatterns = getSetting(settings, "bashConfirm.autoAccept.neverAllowPatterns", []) as string[];
-        const autoAcceptSessionOverride = getAutoAcceptSessionOverride(ctx);
-        const autoAcceptStrictnessSessionOverride = getAutoAcceptStrictnessSessionOverride(ctx);
-        const autoAcceptStrictnessEffective = autoAcceptStrictnessSessionOverride ?? autoAcceptStrictnessByConfig;
-        const autoAcceptEffective = autoAcceptSessionOverride
-          ? autoAcceptSessionOverride === "on"
-          : autoAcceptEnabledByConfig;
+      const { settings } = loadMergedSettings(ctx.cwd, ctx);
+      const bashConfirmState = getBashConfirmEnabledState(ctx, settings);
+      const autoAcceptEnabledByConfig = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
+      const autoAcceptSessionOverride = getAutoAcceptSessionOverride(ctx);
+      const autoAcceptEnabled = autoAcceptSessionOverride
+        ? autoAcceptSessionOverride === "on"
+        : autoAcceptEnabledByConfig;
+      const autoAcceptStrictnessByConfig = normalizeAutoAcceptStrictness(
+        getSetting(settings, "bashConfirm.autoAccept.strictness", "permissive"),
+      );
+      const autoAcceptStrictness = getAutoAcceptStrictnessSessionOverride(ctx) ?? autoAcceptStrictnessByConfig;
 
-        ctx.ui.notify(`bash-confirm: enabled=${enabled}, debug=${debugEnabled}`, "info");
-        ctx.ui.notify(`notifications: enabled=${notifyEnabled}, onShown=${onShown}, onBlocked=${onBlocked}, onModified=${onModified}`, "info");
-        ctx.ui.notify(`telegram: token=${maskToken(token)}, chatId=${chatId || "(missing)"}, timeoutMs=${timeoutMs}, forceIpv4=${forceIpv4}`, "info");
-        ctx.ui.notify(`safeCommands: [${safeCommands.join(", ") || "(none)"}]`, "info");
-        ctx.ui.notify(`blockedCommands: [${blockedCommands.join(", ") || "(none)"}]`, "info");
-        ctx.ui.notify(
-          `autoAccept: configEnabled=${autoAcceptEnabledByConfig}, effectiveEnabled=${autoAcceptEffective}, strictness(config=${autoAcceptStrictnessByConfig}, effective=${autoAcceptStrictnessEffective}), model=${autoAcceptModel || "(current model)"}, timeoutMs=${autoAcceptTimeoutMs}`,
-          "info",
-        );
-        ctx.ui.notify(
-          `autoAccept.sessionOverride: ${autoAcceptSessionOverride || "(none)"}`,
-          "info",
-        );
-        ctx.ui.notify(
-          `autoAccept.strictnessSessionOverride: ${autoAcceptStrictnessSessionOverride || "(none)"}`,
-          "info",
-        );
-        ctx.ui.notify(
-          `autoAccept.neverAllowPatterns: [${autoAcceptNeverAllowPatterns.join(", ") || "(none)"}]`,
-          "info",
-        );
-        ctx.ui.notify(`settings: global=${globalSettingsPath}`, "info");
-        ctx.ui.notify(`settings: project=${projectSettingsPath}`, "info");
+      const items: SettingItem[] = [
+        {
+          id: "confirmation",
+          label: "Bash confirmation",
+          description: "Enable confirmation and blocked-command checks for this session.",
+          currentValue: bashConfirmState.effectiveEnabled ? "enabled" : "disabled",
+          values: ["enabled", "disabled"],
+        },
+        {
+          id: "auto-accept",
+          label: "Auto-accept",
+          description: "Let the configured model approve low-risk commands for this session.",
+          currentValue: autoAcceptEnabled ? "enabled" : "disabled",
+          values: ["enabled", "disabled"],
+        },
+        {
+          id: "strictness",
+          label: "Auto-accept policy",
+          description: "Strict allows check-only commands; permissive also allows bounded local development writes.",
+          currentValue: autoAcceptStrictness,
+          values: ["permissive", "strict"],
+        },
+      ];
 
-        // Test Telegram connection if configured
-        const telegramEnabled = getSetting(settings, "bashConfirm.notifications.telegram.enabled", false);
-        if (telegramEnabled && token) {
-          try {
-            const me = await telegramCall<{ username?: string; id: number }>({
-              token,
-              method: "getMe",
-              body: {},
-              timeoutMs: 3000,
-              family: forceIpv4 ? 4 : undefined,
-            });
-            if (me.ok === true) {
-              ctx.ui.notify(`Telegram getMe ok: @${me.result.username ?? "(no username)"} (${me.result.id})`, "info");
-            } else {
-              const description = me.description ?? "Unknown error";
-              const code = me.error_code ? ` (code ${me.error_code})` : "";
-              ctx.ui.notify(`Telegram getMe failed: ${description}${code}`, "warning");
+      await ctx.ui.custom((tui, theme, _keybindings, done) => {
+        const container = new Container();
+        container.addChild(new Text(theme.fg("accent", theme.bold("Bash Confirm")), 1, 1));
+
+        const settingsList = new SettingsList(
+          items,
+          items.length + 2,
+          getSettingsListTheme(),
+          (id, newValue) => {
+            if (id === "confirmation") {
+              setBashConfirmSessionOverride(ctx, newValue === "enabled" ? "on" : "off");
+            } else if (id === "auto-accept") {
+              setAutoAcceptSessionOverride(ctx, newValue === "enabled" ? "on" : "off");
+            } else if (id === "strictness") {
+              setAutoAcceptStrictnessSessionOverride(ctx, normalizeAutoAcceptStrictness(newValue));
             }
-          } catch (error: unknown) {
-            const err = error instanceof Error ? error.message : String(error);
-            ctx.ui.notify(`Telegram connection failed: ${err}`, "warning");
-          }
-        }
-        return;
-      }
+          },
+          () => done(undefined),
+        );
+        container.addChild(settingsList);
 
-      if (cmd === "auto-accept" || cmd.startsWith("auto-accept ")) {
-        const autoArgs = cmd.slice("auto-accept".length).trim();
-        const autoEnabledByConfig = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
-        const autoModel = getSetting(settings, "bashConfirm.autoAccept.model", "");
-        const autoTimeoutMs = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
-        const autoStrictnessByConfig = normalizeAutoAcceptStrictness(getSetting(settings, "bashConfirm.autoAccept.strictness", "permissive"));
-        const autoNeverAllowPatterns = getSetting(settings, "bashConfirm.autoAccept.neverAllowPatterns", []) as string[];
-        const autoSessionOverride = getAutoAcceptSessionOverride(ctx);
-        const autoStrictnessSessionOverride = getAutoAcceptStrictnessSessionOverride(ctx);
-        const autoEffectiveEnabled = autoSessionOverride ? autoSessionOverride === "on" : autoEnabledByConfig;
-        const autoEffectiveStrictness = autoStrictnessSessionOverride ?? autoStrictnessByConfig;
-
-        if (!autoArgs || autoArgs === "status") {
-          ctx.ui.notify(`auto-accept config enabled: ${autoEnabledByConfig}`, "info");
-          ctx.ui.notify(`auto-accept effective enabled: ${autoEffectiveEnabled}`, "info");
-          ctx.ui.notify(`auto-accept session override: ${autoSessionOverride || "(none)"}`, "info");
-          ctx.ui.notify(`auto-accept model: ${autoModel || "(current model)"}`, "info");
-          ctx.ui.notify(`auto-accept strictness config: ${autoStrictnessByConfig}`, "info");
-          ctx.ui.notify(`auto-accept strictness effective: ${autoEffectiveStrictness}`, "info");
-          ctx.ui.notify(`auto-accept strictness session override: ${autoStrictnessSessionOverride || "(none)"}`, "info");
-          ctx.ui.notify(`auto-accept timeoutMs: ${autoTimeoutMs}`, "info");
-          ctx.ui.notify(
-            `auto-accept neverAllowPatterns: [${autoNeverAllowPatterns.join(", ") || "(none)"}]`,
-            "info",
-          );
-          return;
-        }
-
-        if (autoArgs === "strictness" || autoArgs.startsWith("strictness ")) {
-          const strictnessArgs = autoArgs.slice("strictness".length).trim().toLowerCase();
-
-          if (!strictnessArgs || strictnessArgs === "status") {
-            const override = getAutoAcceptStrictnessSessionOverride(ctx);
-            const effective = override ?? autoStrictnessByConfig;
-            ctx.ui.notify(`auto-accept strictness config: ${autoStrictnessByConfig}`, "info");
-            ctx.ui.notify(`auto-accept strictness effective: ${effective}`, "info");
-            ctx.ui.notify(`auto-accept strictness session override: ${override || "(none)"}`, "info");
-            return;
-          }
-
-          if (strictnessArgs === "strict" || strictnessArgs === "permissive") {
-            setAutoAcceptStrictnessSessionOverride(ctx, strictnessArgs);
-            ctx.ui.notify(`Set auto-accept strictness session override: ${strictnessArgs}`, "success");
-            return;
-          }
-
-          if (strictnessArgs === "clear" || strictnessArgs === "reset" || strictnessArgs === "default") {
-            clearAutoAcceptStrictnessSessionOverride(ctx);
-            ctx.ui.notify("Cleared auto-accept strictness session override", "success");
-            ctx.ui.notify(`auto-accept strictness effective: ${autoStrictnessByConfig}`, "info");
-            return;
-          }
-
-          ctx.ui.notify("Usage: /bash-confirm auto-accept strictness [status|strict|permissive|clear]", "info");
-          return;
-        }
-
-        if (autoArgs === "session" || autoArgs.startsWith("session ")) {
-          const sessionArgs = autoArgs.slice("session".length).trim().toLowerCase();
-
-          if (!sessionArgs || sessionArgs === "status") {
-            const override = getAutoAcceptSessionOverride(ctx);
-            const effective = override ? override === "on" : autoEnabledByConfig;
-            ctx.ui.notify(`auto-accept session override: ${override || "(none)"}`, "info");
-            ctx.ui.notify(`auto-accept effective enabled: ${effective}`, "info");
-            return;
-          }
-
-          if (sessionArgs === "on") {
-            setAutoAcceptSessionOverride(ctx, "on");
-            ctx.ui.notify("Set auto-accept session override: on", "success");
-            return;
-          }
-
-          if (sessionArgs === "off") {
-            setAutoAcceptSessionOverride(ctx, "off");
-            ctx.ui.notify("Set auto-accept session override: off", "success");
-            return;
-          }
-
-          if (sessionArgs === "clear" || sessionArgs === "reset" || sessionArgs === "default") {
-            clearAutoAcceptSessionOverride(ctx);
-            const effective = autoEnabledByConfig;
-            ctx.ui.notify("Cleared auto-accept session override", "success");
-            ctx.ui.notify(`auto-accept effective enabled: ${effective}`, "info");
-            return;
-          }
-
-          ctx.ui.notify("Usage: /bash-confirm auto-accept session [status|on|off|clear]", "info");
-          return;
-        }
-
-        if (autoArgs.startsWith("test ")) {
-          const testCommand = autoArgs.slice("test ".length).trim();
-          if (!testCommand) {
-            ctx.ui.notify("Usage: /bash-confirm auto-accept test <command>", "warning");
-            return;
-          }
-
-          const evaluated = await evaluateAutoAcceptCommand(testCommand, ctx, settings, autoEffectiveStrictness);
-          if (evaluated.result) {
-            ctx.ui.notify(
-              `auto-accept (${evaluated.result.modelRef}): ${evaluated.result.decision} — ${evaluated.result.reason}`,
-              "info",
-            );
-          } else {
-            ctx.ui.notify(`auto-accept test failed: ${evaluated.error}`, "warning");
-          }
-          return;
-        }
-
-        ctx.ui.notify("Usage: /bash-confirm auto-accept [status|strictness [status|strict|permissive|clear]|session [status|on|off|clear]|test <command>]", "info");
-        return;
-      }
-
-      if (cmd === "suggest-generalize" || cmd === "sg") {
-        const whitelist = loadWhitelist(ctx.cwd);
-        if (whitelist.entries.length === 0) {
-          ctx.ui.notify("Whitelist is empty. Add entries first.", "warning");
-          return;
-        }
-
-        pendingGeneralizationRequest = {
-          cwd: ctx.cwd,
-          whitelistFingerprint: buildWhitelistFingerprint(whitelist),
+        return {
+          render: (width: number) => container.render(width),
+          invalidate: () => container.invalidate(),
+          handleInput: (data: string) => {
+            settingsList.handleInput(data);
+            tui.requestRender();
+          },
         };
-
-        queueAiGeneralizationReview(pi, ctx, whitelist);
-        ctx.ui.notify("Queued AI whitelist generalization review. Recommendations will be applied after confirmation.", "info");
-        return;
-      }
-
-      // Whitelist commands
-      if (cmd === "whitelist" || cmd.startsWith("whitelist ")) {
-        const wlInput = cmd.slice("whitelist".length).trim();
-        const subcommandRaw = wlInput.split(/\s+/, 1)[0] || "list";
-        const subcommand = subcommandRaw.toLowerCase();
-        const wlArgs = wlInput.slice(subcommandRaw.length).trim();
-
-        if (subcommand === "list" || subcommand === "ls") {
-          const whitelist = loadWhitelist(ctx.cwd);
-          ctx.ui.notify(`Whitelist (${whitelist.entries.length} entries):`, "info");
-          if (whitelist.entries.length === 0) {
-            ctx.ui.notify("  (empty)", "info");
-          } else {
-            whitelist.entries.forEach((entry, i) => {
-              ctx.ui.notify(formatWhitelistEntry(entry, i), "info");
-            });
-          }
-          return;
-        }
-
-        if (subcommand === "suggest-generalize" || subcommand === "sg") {
-          const whitelist = loadWhitelist(ctx.cwd);
-          if (whitelist.entries.length === 0) {
-            ctx.ui.notify("Whitelist is empty. Add entries first.", "warning");
-            return;
-          }
-
-          pendingGeneralizationRequest = {
-            cwd: ctx.cwd,
-            whitelistFingerprint: buildWhitelistFingerprint(whitelist),
-          };
-
-          queueAiGeneralizationReview(pi, ctx, whitelist);
-          ctx.ui.notify("Queued AI whitelist generalization review. Recommendations will be applied after confirmation.", "info");
-          return;
-        }
-
-        if (subcommand === "add" || subcommand === "a" || subcommand === "add-exact") {
-          const parsed = parseValueAndNote(wlArgs);
-          if (!parsed.value) {
-            ctx.ui.notify("Usage: /bash-confirm whitelist add <command> [--note <note>]", "warning");
-            return;
-          }
-
-          const added = addExactToWhitelist(ctx.cwd, parsed.value, parsed.note, "user");
-          ctx.ui.notify(
-            added ? `Added exact whitelist entry: ${parsed.value}` : `Exact whitelist entry already exists: ${parsed.value}`,
-            added ? "success" : "info",
-          );
-          return;
-        }
-
-        if (subcommand === "add-pattern" || subcommand === "ap") {
-          const parsed = parseValueAndNote(wlArgs);
-          if (!parsed.value) {
-            ctx.ui.notify("Usage: /bash-confirm whitelist add-pattern <regex> [--note <note>]", "warning");
-            return;
-          }
-
-          const validation = validateWhitelistPattern(parsed.value);
-          if (validation.ok === false) {
-            ctx.ui.notify(`Invalid pattern: ${validation.reason}`, "warning");
-            return;
-          }
-
-          const added = addPatternToWhitelist(ctx.cwd, parsed.value, parsed.note, "user");
-          ctx.ui.notify(
-            added ? `Added pattern whitelist entry: ${parsed.value}` : `Pattern whitelist entry already exists: ${parsed.value}`,
-            added ? "success" : "info",
-          );
-          return;
-        }
-
-        if (subcommand === "remove" || subcommand === "rm" || subcommand === "delete" || subcommand === "del") {
-          if (!wlArgs) {
-            ctx.ui.notify("Usage: /bash-confirm whitelist remove <value>", "warning");
-            return;
-          }
-          const removed = removeFromWhitelist(ctx.cwd, wlArgs);
-          if (removed) {
-            ctx.ui.notify(`Removed whitelist entry: ${wlArgs}`, "success");
-          } else {
-            ctx.ui.notify(`Whitelist entry not found: ${wlArgs}`, "warning");
-          }
-          return;
-        }
-
-        if (subcommand === "clear" || subcommand === "delete-all") {
-          const whitelist = loadWhitelist(ctx.cwd);
-          if (whitelist.entries.length === 0) {
-            ctx.ui.notify("Whitelist is already empty", "info");
-            return;
-          }
-          whitelist.entries = [];
-          saveWhitelist(ctx.cwd, whitelist);
-          ctx.ui.notify("Cleared whitelist", "success");
-          return;
-        }
-
-        if (subcommand === "path" || subcommand === "where" || subcommand === "file") {
-          ctx.ui.notify(`Whitelist file: ${join(ctx.cwd, ".pi", "bash-confirm-whitelist.json")}`, "info");
-          return;
-        }
-
-        ctx.ui.notify("Usage: /bash-confirm whitelist [list|add|add-pattern|suggest-generalize|remove|clear|path]", "info");
-        return;
-      }
-
-      ctx.ui.notify("Usage: /bash-confirm [test-notify|debug|auto-accept ...|suggest-generalize|whitelist ...]", "info");
+      });
     },
   });
 

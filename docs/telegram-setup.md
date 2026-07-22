@@ -138,34 +138,21 @@ export PI_TELEGRAM_CHAT_ID="987654321"
 
 ## Step 4: Test the Setup
 
-Start pi and run the test command:
+Test the Telegram credentials directly:
 
+```bash
+curl -X POST "https://api.telegram.org/botYOUR_TOKEN/sendMessage" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_id": "YOUR_CHAT_ID", "text": "Test from pi-bash-confirm"}'
 ```
-/bash-confirm test-notify
-```
 
-If successful, you should receive a notification in Telegram:
-
-```
-⛔ Command Blocked
-
-Session: abc12345
-Directory: /home/user/project
-
-Command
-test-command --dry-run
-
-Reason
-Test notification from /bash-confirm test-notify
-
-2026-01-26T17:00:00.000Z
-```
+Then start pi, run a command that opens the confirmation dialog, and block it. You should receive the blocked-command notification in Telegram.
 
 ## Troubleshooting
 
 ### No Notification Received
 
-1. **Check configuration**: Run `/bash-confirm debug` to verify settings
+1. **Check configuration**: Verify the `bashConfirm.notifications` settings
 2. **Verify bot token**: Make sure you copied the full token correctly
 3. **Check chat ID**: Ensure the chat ID is correct (no extra spaces)
 4. **Start the bot**: Make sure you've sent `/start` to your bot
@@ -208,7 +195,7 @@ If notifications fail with network errors:
 1. Verify settings file path is correct
 2. Check JSON syntax (use a JSON validator)
 3. Restart pi after changing settings
-4. Use `/bash-confirm debug` to see loaded configuration
+4. Set `bashConfirm.debug` to `true` and retry a command
 
 ## Advanced Configuration
 

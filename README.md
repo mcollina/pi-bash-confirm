@@ -1,10 +1,11 @@
 # pi-bash-confirm
 
-A [pi](https://github.com/mariozechner/pi) package that adds a confirmation dialog before executing bash commands in the TUI, with Telegram notification support for blocked and modified commands.
+A [pi](https://github.com/earendil-works/pi) package that adds a confirmation dialog before executing bash commands in the TUI, with Telegram notification support for blocked and modified commands.
 
 ## Features
 
 - **Confirmation Dialog**: Interactively approve, edit, always accept (exact/generic), or block bash commands before execution
+- **Interactive Settings**: Use `/bash-confirm` to configure confirmation and auto-accept from one compact panel
 - **Command Patterns**: Configure safe commands (auto-allow) and blocked commands (auto-block) using regex
 - **Per-Project Whitelist**: Commands added as exact or regex-pattern entries won't prompt again in that project
 - **Edit Mode**: Modify commands before approval using pi's built-in editor
@@ -15,7 +16,7 @@ A [pi](https://github.com/mariozechner/pi) package that adds a confirmation dial
 
 ## Installation
 
-Requires pi / `@mariozechner/pi-coding-agent` `0.63.0` or newer.
+Requires pi / `@earendil-works/pi-coding-agent` `0.80.x`.
 
 ```bash
 pi install npm:pi-bash-confirm
@@ -87,31 +88,17 @@ export PI_TELEGRAM_TOKEN="your_bot_token"
 export PI_TELEGRAM_CHAT_ID="your_chat_id"
 ```
 
-### Test Notifications
+### Interactive Settings
 
-Test your Telegram notification setup:
+Run one command—without arguments or subcommands:
 
-```
-/bash-confirm test-notify
-```
-
-### Debug Configuration
-
-To show in-TUI debug notifications explaining why commands were allowed/blocked, enable:
-
-```json
-{
-  "bashConfirm": {
-    "debug": true
-  }
-}
+```text
+/bash-confirm
 ```
 
-View your current configuration:
+The panel controls bash confirmation, auto-accept, and auto-accept policy for the current session. Persistent defaults remain in `settings.json`. Disabling bash confirmation also bypasses configured blocked-command checks for that session.
 
-```
-/bash-confirm debug
-```
+To show debug notifications explaining why commands were allowed or blocked, set `bashConfirm.debug` to `true` in `settings.json`.
 
 ## Configuration
 
@@ -376,17 +363,7 @@ The dialog supports two whitelist modes:
 
 ### Managing the Whitelist
 
-Use the `/bash-confirm whitelist` subcommands:
-
-| Command | Description |
-|---------|-------------|
-| `/bash-confirm whitelist list` | Show all whitelist entries |
-| `/bash-confirm whitelist add <command> [--note <note>]` | Add an exact-match whitelist entry |
-| `/bash-confirm whitelist add-pattern <regex> [--note <note>]` | Add a regex pattern whitelist entry |
-| `/bash-confirm whitelist suggest-generalize` | Ask AI to recommend safe pattern generalizations for overlapping entries |
-| `/bash-confirm whitelist remove <value>` | Remove entries with the exact stored value |
-| `/bash-confirm whitelist clear` | Remove all entries from whitelist |
-| `/bash-confirm whitelist path` | Show path to whitelist file |
+Add entries directly from the confirmation dialog with **Always Accept (Exact)** or **Always Accept (Generic)**. To inspect, remove, or share entries, edit `.pi/bash-confirm-whitelist.json`.
 
 ### Whitelist File Format
 
@@ -413,16 +390,6 @@ Use the `/bash-confirm whitelist` subcommands:
 ```
 
 The whitelist file can be committed to version control if you want to share whitelisted commands with your team.
-
-### AI Suggestions for Overlapping Entries
-
-Run:
-
-```text
-/bash-confirm suggest-generalize
-```
-
-(or `/bash-confirm whitelist suggest-generalize`) to queue an AI review of your current whitelist. The AI returns a structured plan, then the extension asks for confirmation and applies safe changes automatically (add pattern entries + remove covered exact entries). If the whitelist changed during analysis, auto-apply is skipped for safety.
 
 ## Optional `auto-accept` Mode (Fast Model)
 
@@ -458,8 +425,7 @@ Notes:
 - Use `autoAccept.strictness` to tune policy: `strict` favors check-only commands, while `permissive` can allow bounded local dev write workflows (for example `git commit`, `eslint --fix`, or `prettier --write`).
 - High-risk operations (for example rebase/reset/push, publish/deploy, destructive deletes, privilege escalation) should fall back to manual review.
 - Use `autoAccept.neverAllowPatterns` to force manual review for command families you never want auto-approved.
-- You can override auto-accept for the current session with `/bash-confirm auto-accept session on|off|clear`.
-- You can override strictness for the current session with `/bash-confirm auto-accept strictness strict|permissive|clear`.
+- Use `/bash-confirm` to override auto-accept and strictness for the current session.
 - Use a low-latency model to keep shell flow responsive.
 - The command text is sent to the configured model for evaluation.
 
@@ -513,24 +479,11 @@ rm -rf ./old-dir-backup
 2026-01-26T16:52:10.456Z
 ```
 
-## Commands
+## Command
 
 | Command | Description |
 |---------|-------------|
-| `/bash-confirm test-notify` | Send a test notification to verify Telegram setup |
-| `/bash-confirm debug` | Display current configuration status |
-| `/bash-confirm auto-accept` | Show auto-accept status (config/effective/session override/model/strictness/timeout) |
-| `/bash-confirm auto-accept strictness [status\|strict\|permissive\|clear]` | Manage strictness override for the current session only |
-| `/bash-confirm auto-accept session [status\|on\|off\|clear]` | Manage auto-accept enable/disable override for the current session only |
-| `/bash-confirm auto-accept test <command>` | Test auto-accept decision for a command without executing it |
-| `/bash-confirm suggest-generalize` | Ask AI to recommend whitelist generalizations |
-| `/bash-confirm whitelist list` | Show all whitelist entries |
-| `/bash-confirm whitelist add <cmd> [--note <note>]` | Add an exact command to the project whitelist |
-| `/bash-confirm whitelist add-pattern <regex> [--note <note>]` | Add a regex pattern to the project whitelist |
-| `/bash-confirm whitelist suggest-generalize` | Ask AI to recommend safe pattern generalizations |
-| `/bash-confirm whitelist remove <value>` | Remove whitelist entries matching a stored value |
-| `/bash-confirm whitelist clear` | Remove all entries from the whitelist |
-| `/bash-confirm whitelist path` | Show path to the whitelist file |
+| `/bash-confirm` | Open the interactive session settings panel |
 
 ## Configuration Priority
 
@@ -556,9 +509,9 @@ To allow commands in non-interactive mode, add them to `safeCommands` or enable 
 
 ### Notifications Not Working
 
-1. Run `/bash-confirm debug` to check configuration
-2. Verify bot token and chat ID are correct
-3. Make sure notifications are enabled: `bashConfirm.notifications.enabled: true`
+1. Verify bot token and chat ID are correct
+2. Make sure notifications are enabled: `bashConfirm.notifications.enabled: true`
+3. Set `bashConfirm.debug` to `true` and retry a command
 4. Check Telegram bot is running (send it a message)
 5. Verify bot token hasn't expired
 
@@ -566,9 +519,9 @@ To allow commands in non-interactive mode, add them to `safeCommands` or enable 
 
 If commands are being blocked unexpectedly:
 
-1. Check if `bashConfirm.enabled` is `true`
+1. Open `/bash-confirm` and check that bash confirmation is enabled
 2. Verify commands don't match `blockedCommands` patterns
-3. Run `/bash-confirm debug` to see current configuration
+3. Set `bashConfirm.debug` to `true` for decision notifications
 4. Add safe patterns to `safeCommands` if needed
 
 ### Invalid Regex Patterns
@@ -639,19 +592,18 @@ You can also load the extension file directly:
 
 After installing locally:
 1. Restart pi
-2. Run `/bash-confirm debug` to verify the extension loaded
-3. Run `/bash-confirm test-notify` to test notifications
-4. Try running a bash command to see the confirmation dialog
+2. Run `/bash-confirm` to verify the settings panel opens
+3. Try running a bash command to see the confirmation dialog
 
 ### Development Workflow
 
 1. Make changes to `extensions/bash-confirm.ts`
 2. For Method 1: Re-copy the file to the extensions directory
 3. For Methods 2 & 3: Restart pi to reload changes
-4. Test with `/bash-confirm debug` and bash commands
+4. Test with `/bash-confirm` and bash commands
 
 ## Related
 
-- [pi](https://github.com/mariozechner/pi) - AI coding agent
-- [pi packages documentation](https://github.com/mariozechner/pi/blob/main/docs/packages.md)
-- [pi extensions documentation](https://github.com/mariozechner/pi/blob/main/docs/extensions.md)
+- [pi](https://github.com/earendil-works/pi) - AI coding agent
+- [pi packages documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md)
+- [pi extensions documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)

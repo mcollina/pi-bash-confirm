@@ -67,13 +67,7 @@ export PI_TELEGRAM_CHAT_ID="YOUR_CHAT_ID"
 
 ### 4. Test
 
-Start pi and run:
-
-```
-/bash-confirm test-notify
-```
-
-You should receive a test notification in Telegram!
+Use the direct API test below, then start pi and block a command from the confirmation dialog. You should receive both notifications in Telegram.
 
 ## Quick Test Command
 
@@ -92,7 +86,7 @@ curl -X POST "https://api.telegram.org/botYOUR_TOKEN/sendMessage" \
 
 - Make sure you sent `/start` to your bot
 - Check the token and chat ID are correct (no extra spaces)
-- Run `/bash-confirm debug` in pi to check configuration
+- Verify `bashConfirm.notifications` in `settings.json`
 
 ### "Unauthorized" error?
 

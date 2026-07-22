@@ -199,30 +199,15 @@ Notification failures are **non-blocking** - they don't interrupt the confirmati
 
 ## Testing
 
-### Test Notification Command
+Test Telegram directly before testing the extension:
 
-Send a test notification to verify your setup:
-
-```
-/bash-confirm test-notify
-```
-
-This sends a blocked command notification for a test command.
-
-### Debug Configuration
-
-View current notification configuration:
-
-```
-/bash-confirm debug
+```bash
+curl -X POST "https://api.telegram.org/botTOKEN/sendMessage" \
+  -d "chat_id=CHAT_ID" \
+  -d "text=Test from pi-bash-confirm"
 ```
 
-Output includes:
-- Notification enabled status
-- Telegram enabled status
-- Event type settings (onShown, onBlocked, onModified, onAllowed)
-- Token and chat ID status (configured/missing)
-- Settings file paths
+Then run a command that opens the confirmation dialog and block it. To see command-decision diagnostics in pi, set `bashConfirm.debug` to `true` in `settings.json`.
 
 ## Performance Considerations
 
@@ -342,7 +327,7 @@ const channels = [
 
 ### Notifications Not Arriving
 
-1. Check `/bash-confirm debug` output
+1. Verify notification settings in `settings.json`
 2. Verify bot is running (send `/start` to your bot)
 3. Test API directly:
    ```bash
