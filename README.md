@@ -112,7 +112,7 @@ To show debug notifications explaining why commands were allowed or blocked, set
 | `blockedCommands` | string[] | `[]` | Regex patterns for always-blocked commands |
 | `autoAccept.enabled` | boolean | `false` | Enable optional model-based auto-accept decision flow |
 | `autoAccept.model` | string | `""` | Model reference (`provider/modelId`) used for auto-accept; falls back to current model when empty |
-| `autoAccept.timeoutMs` | number | `5000` | Timeout for auto-accept model request (clamped to 1000-20000 ms) |
+| `autoAccept.timeoutMs` | number | `5000` | Grace period before showing manual review (clamped to 1000-20000 ms); a late `allow` can dismiss the open dialog |
 | `autoAccept.strictness` | string | `"permissive"` | Auto-accept policy mode: `strict` (narrow) or `permissive` (broader local dev writes allowed) |
 | `autoAccept.neverAllowPatterns` | string[] | `[]` | Regex patterns that must always require manual confirmation (auto-accept is skipped) |
 
@@ -427,6 +427,7 @@ Notes:
 - Use `autoAccept.neverAllowPatterns` to force manual review for command families you never want auto-approved.
 - Use `/bash-confirm` to override auto-accept and strictness for the current session.
 - Use a low-latency model to keep shell flow responsive.
+- `timeoutMs` limits how long the hook waits before showing manual review; if the model later returns `allow` while the dialog is open, the dialog is dismissed automatically.
 - The command text is sent to the configured model for evaluation.
 
 ## Notification Examples

@@ -677,12 +677,35 @@ function parseAutoAcceptDecision(text: string): { result?: AutoAcceptResult; err
   };
 }
 
-async function evaluateAutoAcceptCommand(
+type AutoAcceptEvaluation = {
+  result?: AutoAcceptResult;
+  error?: string;
+};
+
+type AutoAcceptRequest = {
+  timeoutMs: number;
+  response: Promise<AutoAcceptEvaluation>;
+  cancel: () => void;
+};
+
+function getAutoAcceptTimeoutMs(settings: JsonObject): number {
+  const timeoutMsRaw = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
+  const timeoutMsNumber = Number(timeoutMsRaw);
+
+  // This bounds how long auto-accept may delay showing the safety dialog. The
+  // model request remains alive after this grace period so a late "allow" can
+  // still dismiss an open dialog; it is cancelled when the dialog closes.
+  return Number.isFinite(timeoutMsNumber)
+    ? Math.min(20000, Math.max(1000, timeoutMsNumber))
+    : 5000;
+}
+
+async function createAutoAcceptRequest(
   command: string,
   ctx: ExtensionContext,
   settings: JsonObject,
   strictnessOverride?: AutoAcceptStrictness,
-): Promise<{ result?: AutoAcceptResult; error?: string }> {
+): Promise<{ request?: AutoAcceptRequest; error?: string }> {
   const configuredModel = (getSetting(settings, "bashConfirm.autoAccept.model", "") as string).trim();
   const strictness = strictnessOverride ?? normalizeAutoAcceptStrictness(getSetting(settings, "bashConfirm.autoAccept.strictness", "permissive"));
 
@@ -709,70 +732,70 @@ async function evaluateAutoAcceptCommand(
     return { error: auth.error };
   }
 
-  const timeoutMsRaw = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
-  const timeoutMsNumber = Number(timeoutMsRaw);
-  const timeoutMs = Number.isFinite(timeoutMsNumber)
-    ? Math.min(20000, Math.max(1000, timeoutMsNumber))
-    : 5000;
-
-  const timeoutController = new AbortController();
-  const timeoutHandle = setTimeout(() => timeoutController.abort(), timeoutMs);
-
-  try {
-    const assistant = await completeSimple(
-      model,
-      {
-        systemPrompt: "You are a strict bash security reviewer. Output JSON only.",
-        messages: [{ role: "user", content: buildAutoAcceptPrompt(ctx.cwd, command, strictness), timestamp: Date.now() }],
-      },
-      {
-        apiKey: auth.apiKey,
-        headers: auth.headers,
-        env: auth.env,
-        reasoning: "minimal",
-        maxTokens: 120,
-        signal: timeoutController.signal,
-      },
-    );
-
-    const responseText = extractAssistantTextFromContent(assistant);
-    if (!responseText) {
-      const modelError = isPlainObject(assistant) && typeof assistant.errorMessage === "string"
-        ? assistant.errorMessage.trim()
-        : "";
-      const stopReason = isPlainObject(assistant) && typeof assistant.stopReason === "string"
-        ? assistant.stopReason
-        : "";
-      const diagnostic = modelError || (stopReason ? `No text output (stopReason=${stopReason})` : "Model returned no text");
-
-      return {
-        result: {
-          decision: "review",
-          reason: `${diagnostic}; falling back to manual review.`,
-          modelRef,
+  const requestController = new AbortController();
+  const response = (async (): Promise<AutoAcceptEvaluation> => {
+    try {
+      const assistant = await completeSimple(
+        model,
+        {
+          systemPrompt: "You are a strict bash security reviewer. Output JSON only.",
+          messages: [{ role: "user", content: buildAutoAcceptPrompt(ctx.cwd, command, strictness), timestamp: Date.now() }],
         },
-      };
-    }
-
-    const parsedDecision = parseAutoAcceptDecision(responseText);
-    if (!parsedDecision.result) {
-      return {
-        result: {
-          decision: "review",
-          reason: `${parsedDecision.error || "Failed to parse auto-accept response"}; falling back to manual review.`,
-          modelRef,
+        {
+          apiKey: auth.apiKey,
+          headers: auth.headers,
+          env: auth.env,
+          reasoning: "minimal",
+          maxTokens: 120,
+          signal: requestController.signal,
         },
-      };
-    }
+      );
 
-    parsedDecision.result.modelRef = modelRef;
-    return { result: parsedDecision.result };
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { error: `Auto-accept model request failed: ${message}` };
-  } finally {
-    clearTimeout(timeoutHandle);
-  }
+      const responseText = extractAssistantTextFromContent(assistant);
+      if (!responseText) {
+        const modelError = isPlainObject(assistant) && typeof assistant.errorMessage === "string"
+          ? assistant.errorMessage.trim()
+          : "";
+        const stopReason = isPlainObject(assistant) && typeof assistant.stopReason === "string"
+          ? assistant.stopReason
+          : "";
+        const diagnostic = modelError || (stopReason ? `No text output (stopReason=${stopReason})` : "Model returned no text");
+
+        return {
+          result: {
+            decision: "review",
+            reason: `${diagnostic}; falling back to manual review.`,
+            modelRef,
+          },
+        };
+      }
+
+      const parsedDecision = parseAutoAcceptDecision(responseText);
+      if (!parsedDecision.result) {
+        return {
+          result: {
+            decision: "review",
+            reason: `${parsedDecision.error || "Failed to parse auto-accept response"}; falling back to manual review.`,
+            modelRef,
+          },
+        };
+      }
+
+      parsedDecision.result.modelRef = modelRef;
+      return { result: parsedDecision.result };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { error: `Auto-accept model request failed: ${message}` };
+    }
+  })();
+
+  return {
+    request: {
+      timeoutMs: getAutoAcceptTimeoutMs(settings),
+      response,
+      cancel: () => requestController.abort(),
+    },
+  };
 }
 
 async function telegramCall<T>(options: {
@@ -1194,24 +1217,57 @@ export default function (pi: ExtensionAPI) {
       debugNotify(ctx, settings, `auto-accept strictness session override active: ${autoAcceptStrictnessSessionOverride}`);
     }
 
+    let pendingAutoAcceptRequest: AutoAcceptRequest | undefined;
+    let pendingAutoAcceptResponse: Promise<AutoAcceptEvaluation> | undefined;
+    let pendingAutoAcceptHandled = false;
+
     if (autoAcceptEnabled && !matchesNeverAllowPattern) {
-      const autoAccept = await evaluateAutoAcceptCommand(command, ctx, settings, autoAcceptStrictness);
-      if (autoAccept.result) {
-        if (autoAccept.result.decision === "allow") {
+      const autoAccept = await createAutoAcceptRequest(command, ctx, settings, autoAcceptStrictness);
+      if (autoAccept.request) {
+        const request = autoAccept.request;
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const waitResult = await new Promise<
+          | { type: "response"; evaluation: AutoAcceptEvaluation }
+          | { type: "timeout" }
+        >((resolve) => {
+          timeoutHandle = setTimeout(() => resolve({ type: "timeout" }), request.timeoutMs);
+          void request.response.then((evaluation) => resolve({ type: "response", evaluation }));
+        });
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+
+        if (waitResult.type === "response") {
+          request.cancel();
+          const autoAccept = waitResult.evaluation;
+          if (autoAccept.result) {
+            if (autoAccept.result.decision === "allow") {
+              debugNotify(
+                ctx,
+                settings,
+                `auto-accept allowed command via ${autoAccept.result.modelRef}: ${autoAccept.result.reason}`,
+              );
+              ctx.ui.notify(`auto-accept allowed command: ${autoAccept.result.reason}`, "info");
+              return undefined;
+            }
+
+            debugNotify(
+              ctx,
+              settings,
+              `auto-accept requested manual review via ${autoAccept.result.modelRef}: ${autoAccept.result.reason}`,
+            );
+          } else if (autoAccept.error) {
+            ctx.ui.notify(`auto-accept unavailable: ${autoAccept.error}`, "warning");
+          }
+        } else {
+          // Do not cancel at the grace-period deadline. If the model later
+          // returns allow, an active confirmation dialog will be dismissed.
+          pendingAutoAcceptRequest = request;
+          pendingAutoAcceptResponse = request.response;
           debugNotify(
             ctx,
             settings,
-            `auto-accept allowed command via ${autoAccept.result.modelRef}: ${autoAccept.result.reason}`,
+            `auto-accept exceeded ${request.timeoutMs}ms; showing manual review while the model request continues`,
           );
-          ctx.ui.notify(`auto-accept allowed command: ${autoAccept.result.reason}`, "info");
-          return undefined;
         }
-
-        debugNotify(
-          ctx,
-          settings,
-          `auto-accept requested manual review via ${autoAccept.result.modelRef}: ${autoAccept.result.reason}`,
-        );
       } else if (autoAccept.error) {
         ctx.ui.notify(`auto-accept unavailable: ${autoAccept.error}`, "warning");
       }
@@ -1219,6 +1275,7 @@ export default function (pi: ExtensionAPI) {
 
     // No UI available - block for safety
     if (!ctx.hasUI) {
+      pendingAutoAcceptRequest?.cancel();
       const reason = "Confirmation required (no UI available)";
       debugNotify(ctx, settings, `Blocked: ${reason}`);
       return await blockAndStop(ctx, command, reason, pi);
@@ -1233,8 +1290,35 @@ export default function (pi: ExtensionAPI) {
 
     // Show confirmation dialog
     const genericPreview = tokenizeWithExamples(command);
+    let dialogOpen = true;
+    let dialogSettled = false;
+    let dismissDialog: (() => void) | undefined;
 
     const result = await ctx.ui.custom((tui, theme, _kb, done) => {
+      const finish = (value: string) => {
+        if (!dialogOpen || dialogSettled) return;
+        dialogSettled = true;
+        done(value);
+      };
+      dismissDialog = () => finish("auto-allow");
+
+      if (pendingAutoAcceptResponse) {
+        void pendingAutoAcceptResponse.then((evaluation) => {
+          if (!dialogOpen || dialogSettled || pendingAutoAcceptHandled) return;
+          const autoAccept = evaluation.result;
+          if (!autoAccept || autoAccept.decision !== "allow") return;
+
+          pendingAutoAcceptHandled = true;
+          debugNotify(
+            ctx,
+            settings,
+            `late auto-accept allowed command via ${autoAccept.modelRef}: ${autoAccept.reason}`,
+          );
+          dismissDialog?.();
+          ctx.ui.notify(`auto-accept allowed command: ${autoAccept.reason}`, "info");
+        });
+      }
+
       let selectedIndex = 0;
       const options = [
         { value: "allow", label: "Allow", description: "Execute the command as-is" },
@@ -1260,16 +1344,16 @@ export default function (pi: ExtensionAPI) {
           if (numericIndex >= 0 && numericIndex < options.length) {
             selectedIndex = numericIndex;
             tui.requestRender();
-            done(options[selectedIndex].value);
+            finish(options[selectedIndex].value);
           }
           return;
         }
         if (data === "\r" || data === "\n") { // Enter
-          done(options[selectedIndex].value);
+          finish(options[selectedIndex].value);
           return;
         }
         if (data === "\u001B") { // Escape
-          done("cancel");
+          finish("cancel");
         }
       }
 
@@ -1335,11 +1419,16 @@ export default function (pi: ExtensionAPI) {
         handleInput,
       };
     }, { overlay: true, overlayOptions: { anchor: "bottom-center", width: "100%", maxHeight: "90%", margin: 1 } });
+    dialogOpen = false;
+    pendingAutoAcceptRequest?.cancel();
 
     // Handle user choice
     switch (result) {
       case "allow":
         debugNotify(ctx, settings, "User allowed command");
+        return undefined; // Execute normally
+      case "auto-allow":
+        debugNotify(ctx, settings, "Late auto-accept allowed command");
         return undefined; // Execute normally
       case "always-accept": {
         debugNotify(ctx, settings, "User allowed and exactly whitelisted command");

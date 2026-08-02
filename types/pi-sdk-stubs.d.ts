@@ -21,4 +21,5 @@ declare module "@earendil-works/pi-tui" {
 
 declare module "@earendil-works/pi-ai/compat" {
   export function completeSimple(model: any, context: any, options?: any): Promise<any>;
+  export function registerFauxProvider(options?: any): any;
 }
