@@ -423,6 +423,9 @@ Example:
 Notes:
 - This mode is **optional** and off by default.
 - Use `autoAccept.strictness` to tune policy: `strict` favors check-only commands, while `permissive` can allow bounded local dev write workflows (for example `git commit`, `eslint --fix`, or `prettier --write`).
+- `cd` is treated as shell-local navigation, not a mutation. For auto-accept policy scope, operations in a command chain are evaluated against the initial working directory; directory changes made by `cd` are ignored.
+- The model receives an explicit allowed-directory list containing the initial working directory, the operating system's temp directory, and directories added for the current session with `/bash-confirm-allow-directory` (including their descendants).
+- Inline interpreter code such as `python -c '...'` and `node -e '...'` is evaluated from its visible source and libraries rather than rejected for using an interpreter. Strict mode requires clear evidence of local, non-destructive behavior; permissive mode may make an educated evidence-based inference.
 - High-risk operations (for example rebase/reset/push, publish/deploy, destructive deletes, privilege escalation) should fall back to manual review.
 - Use `autoAccept.neverAllowPatterns` to force manual review for command families you never want auto-approved.
 - Use `/bash-confirm` to override auto-accept and strictness for the current session.
@@ -485,6 +488,7 @@ rm -rf ./old-dir-backup
 | Command | Description |
 |---------|-------------|
 | `/bash-confirm` | Open the interactive session settings panel |
+| `/bash-confirm-allow-directory [path]` | Allow an existing directory for auto-accept in the current session; omit `path` to enter it interactively |
 
 ## Configuration Priority
 
