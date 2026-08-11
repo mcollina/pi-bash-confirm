@@ -3,6 +3,17 @@ declare module "@earendil-works/pi-coding-agent" {
   export type ExtensionContext = any;
   export function getSettingsListTheme(): any;
   export function initTheme(themeName?: string, enableWatcher?: boolean): void;
+  export class ModelRuntime {
+    static create(options?: any): Promise<ModelRuntime>;
+  }
+  export class ModelRegistry {
+    constructor(runtime: ModelRuntime);
+    find(provider: string, modelId: string): any;
+    getApiKeyAndHeaders(model: any): Promise<
+      | { ok: true; apiKey?: string; headers?: Record<string, string>; env?: Record<string, string> }
+      | { ok: false; error: string }
+    >;
+  }
 }
 
 declare module "@earendil-works/pi-tui" {

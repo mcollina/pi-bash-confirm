@@ -600,6 +600,10 @@ After installing locally:
 2. Run `/bash-confirm` to verify the settings panel opens
 3. Try running a bash command to see the confirmation dialog
 
+### Prompt Evaluation
+
+Run `npm run eval -- --dry-run` to validate the historical command dataset, or evaluate a configured model with `npm run eval -- --model <provider/model>`. See [`evals/README.md`](evals/README.md) for dataset provenance, metrics, and all options.
+
 ### Development Workflow
 
 1. Make changes to `extensions/bash-confirm.ts`

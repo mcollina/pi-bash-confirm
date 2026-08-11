@@ -433,8 +433,8 @@ function compileWhitelistPatterns(entries: WhitelistEntry[]): RegExp[] {
   return compiled;
 }
 
-type AutoAcceptDecision = "allow" | "review";
-type AutoAcceptStrictness = "strict" | "permissive";
+export type AutoAcceptDecision = "allow" | "review";
+export type AutoAcceptStrictness = "strict" | "permissive";
 
 type AutoAcceptResult = {
   decision: AutoAcceptDecision;
@@ -443,6 +443,7 @@ type AutoAcceptResult = {
 };
 
 const AUTO_ACCEPT_MARKER = "[BASH_CONFIRM_AUTO_ACCEPT_V1]";
+export const AUTO_ACCEPT_SYSTEM_PROMPT = "You are a bash auto-accept policy evaluator. Apply the supplied policy exactly and output JSON only.";
 
 type BashConfirmSessionOverride = "on" | "off";
 type AutoAcceptSessionOverride = "on" | "off";
@@ -693,7 +694,7 @@ function extractAssistantTextFromContent(message: unknown): string {
   return chunks.join("").trim();
 }
 
-function parseAutoAcceptDecision(text: string): { result?: AutoAcceptResult; error?: string } {
+export function parseAutoAcceptDecision(text: string): { result?: AutoAcceptResult; error?: string } {
   const jsonText = extractFirstJsonObject(text);
   if (!jsonText) {
     return { error: "No JSON object found in auto-accept response" };
@@ -793,7 +794,7 @@ async function createAutoAcceptRequest(
       const assistant = await completeSimple(
         model,
         {
-          systemPrompt: "You are a bash auto-accept policy evaluator. Apply the supplied policy exactly and output JSON only.",
+          systemPrompt: AUTO_ACCEPT_SYSTEM_PROMPT,
           messages: [{
             role: "user",
             content: buildAutoAcceptPrompt(ctx.cwd, command, strictness, getAdditionalAllowedDirectories(ctx)),

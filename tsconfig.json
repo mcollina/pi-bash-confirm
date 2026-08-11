@@ -13,6 +13,7 @@
   "include": [
     "extensions/**/*.ts",
     "examples/**/*.ts",
+    "evals/**/*.ts",
     "tests/**/*.ts",
     "types/**/*.d.ts"
   ],
