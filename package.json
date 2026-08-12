@@ -23,11 +23,8 @@
     ]
   },
   "files": [
-    "extensions/",
-    "docs/",
-    "examples/",
-    "README.md",
-    "LICENSE"
+    "extensions/bash-confirm.ts",
+    "extensions/command-splitter.ts"
   ],
   "author": "Matteo Collina <hello@matteocollina.com>",
   "license": "MIT",
