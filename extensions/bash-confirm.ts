@@ -444,6 +444,7 @@ type AutoAcceptResult = {
 
 const AUTO_ACCEPT_MARKER = "[BASH_CONFIRM_AUTO_ACCEPT_V1]";
 export const AUTO_ACCEPT_SYSTEM_PROMPT = "You are a bash auto-accept policy evaluator. Apply the supplied policy exactly and output JSON only.";
+export const AUTO_ACCEPT_MAX_TOKENS = 4096;
 
 type BashConfirmSessionOverride = "on" | "off";
 type AutoAcceptSessionOverride = "on" | "off";
@@ -806,7 +807,7 @@ async function createAutoAcceptRequest(
           headers: auth.headers,
           env: auth.env,
           reasoning: "minimal",
-          maxTokens: 120,
+          maxTokens: AUTO_ACCEPT_MAX_TOKENS,
           signal: requestController.signal,
         },
       );

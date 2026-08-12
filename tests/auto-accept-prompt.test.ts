@@ -1,9 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
-import { buildAutoAcceptPrompt } from "../extensions/bash-confirm.ts";
+import { AUTO_ACCEPT_MAX_TOKENS, buildAutoAcceptPrompt } from "../extensions/bash-confirm.ts";
 
 const cwd = "/workspace/project";
+
+test("auto-accept reserves a generous reasoning and JSON output budget", () => {
+  assert.equal(AUTO_ACCEPT_MAX_TOKENS, 4096);
+});
 
 test("strict auto-accept ignores cd when applying policy scope", () => {
   const prompt = buildAutoAcceptPrompt(cwd, "cd ./packages/api && npm test", "strict");

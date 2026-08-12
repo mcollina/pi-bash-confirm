@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
+  AUTO_ACCEPT_MAX_TOKENS,
   AUTO_ACCEPT_SYSTEM_PROMPT,
   buildAutoAcceptPrompt,
   parseAutoAcceptDecision,
@@ -374,7 +375,7 @@ async function main(): Promise<void> {
           headers: auth.headers,
           env: auth.env,
           reasoning: "minimal",
-          maxTokens: 120,
+          maxTokens: AUTO_ACCEPT_MAX_TOKENS,
           signal: controller.signal,
         },
       );
