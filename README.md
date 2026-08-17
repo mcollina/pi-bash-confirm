@@ -1,6 +1,6 @@
 # pi-bash-confirm
 
-A [pi](https://github.com/earendil-works/pi) package that adds a confirmation dialog before executing bash commands in the TUI, with Telegram notification support for blocked and modified commands.
+A [pi](https://github.com/earendil-works/pi) package that confirms bash commands before execution, with TUI and RPC confirmation plus Telegram notification support.
 
 ## Features
 
@@ -11,7 +11,8 @@ A [pi](https://github.com/earendil-works/pi) package that adds a confirmation di
 - **Edit Mode**: Modify commands before approval using pi's built-in editor
 - **Telegram Notifications**: Get notified when commands are blocked or modified
 - **Optional auto-accept Mode**: Let a configurable fast model auto-allow or route to manual review
-- **Non-Interactive Safety**: In hosts without a confirmation UI (print, JSON, RPC, BB), auto-accept is the confirmation path. The extension waits for the model, then allows the command or returns a block reason. The session is not aborted.
+- **Non-Interactive Safety**: In hosts without a confirmation UI, commands are allowed only by safe patterns, the whitelist, or explicitly enabled auto-accept. Blocks return a reason without aborting the session.
+- **RPC Confirmation**: Use Pi's standard selection and editor protocol instead of TUI-only custom components.
 - **Easy Configuration**: All settings configurable via `settings.json` or environment variables
 
 ## Installation
@@ -397,7 +398,7 @@ When `bashConfirm.autoAccept.enabled` is `true`, commands that would normally op
 
 The model must return one of:
 - `allow` → command executes immediately
-- `review` → confirmation dialog in TUI; block with the model reason when there is no UI
+- `review` → confirmation dialog in TUI or RPC; block with the model reason when there is no UI
 
 If the model returns `block`, the extension downgrades that to `review` and asks a human.
 
@@ -430,7 +431,9 @@ Notes:
 - Use `autoAccept.neverAllowPatterns` to force manual review for command families you never want auto-approved.
 - Use `/bash-confirm` to override auto-accept and strictness for the current session.
 - Use a low-latency model to keep shell flow responsive.
-- `timeoutMs` limits how long the hook waits before showing manual review; if the model later returns `allow` while the dialog is open, the dialog is dismissed automatically.
+- In TUI, `timeoutMs` limits how long the hook waits before showing manual review. A later `allow` decision dismisses the open TUI dialog.
+- In RPC, `timeoutMs` limits the wait before the standard confirmation dialog opens.
+- Without a confirmation UI, `timeoutMs` is a hard deadline. A timeout blocks the command and returns the reason to the agent.
 - The command text is sent to the configured model for evaluation.
 
 ## Notification Examples
@@ -499,18 +502,24 @@ Settings are loaded in this order (later overrides earlier):
 3. Project settings (`.pi/settings.json`)
 4. Environment variables (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`)
 
+## RPC Mode
+
+RPC has a confirmation UI through Pi's extension UI protocol.
+The extension uses standard selection and editor dialogs because `ctx.ui.custom()` is TUI-only.
+An explicit user block aborts the current turn.
+
 ## Non-Interactive Mode
 
-When the host has no confirmation UI (print, JSON, RPC, BB), the extension treats auto-accept as the confirmation path:
+When the host has no confirmation UI, such as print, JSON, or a BB integration without extension UI, the extension will:
 
 - Allow commands that match `safeCommands` or the project whitelist
-- If a model is available, wait for auto-accept. Do not apply the TUI grace-period timeout
-- `allow` runs the command
-- `review`, `neverAllowPatterns`, and auto-accept errors return `{ block: true, reason }` to the agent
-- The session is not aborted, so the agent can try a safer command
-- Send blocked command notifications (if configured)
+- Run model review only when `bashConfirm.autoAccept.enabled` is `true`
+- Apply `timeoutMs` as a hard model-response deadline
+- Run the command when the model returns `allow`
+- Return `{ block: true, reason }` for `review`, `neverAllowPatterns`, timeouts, and auto-accept errors
+- Keep the session active so the agent can try a safer command
+- Send blocked command notifications when configured
 
-A session override of auto-accept `off` still blocks commands that need confirmation.
 Add frequent commands to `safeCommands` or the whitelist if you do not want a model call.
 
 ## Troubleshooting

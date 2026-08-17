@@ -745,6 +745,24 @@ type AutoAcceptRequest = {
   cancel: () => void;
 };
 
+type AutoAcceptWaitResult =
+  | { type: "response"; evaluation: AutoAcceptEvaluation }
+  | { type: "timeout" };
+
+async function waitForAutoAccept(request: AutoAcceptRequest): Promise<AutoAcceptWaitResult> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      request.response.then((evaluation) => ({ type: "response", evaluation }) as const),
+      new Promise<{ type: "timeout" }>((resolve) => {
+        timeoutHandle = setTimeout(() => resolve({ type: "timeout" }), request.timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
 function getAutoAcceptTimeoutMs(settings: JsonObject): number {
   const timeoutMsRaw = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
   const timeoutMsNumber = Number(timeoutMsRaw);
@@ -808,7 +826,9 @@ async function createAutoAcceptRequest(
           env: auth.env,
           reasoning: "minimal",
           maxTokens: AUTO_ACCEPT_MAX_TOKENS,
-          signal: requestController.signal,
+          signal: ctx.signal
+            ? AbortSignal.any([requestController.signal, ctx.signal])
+            : requestController.signal,
         },
       );
 
@@ -1149,15 +1169,15 @@ async function sendModifiedNotification(
   }
 }
 
-async function blockAndStop(
+async function blockCommand(
   ctx: ExtensionContext,
   command: string,
   reason: string,
-  pi: ExtensionAPI
+  pi: ExtensionAPI,
+  abortTurn = false,
 ): Promise<{ block: true; reason: string }> {
   await sendBlockedNotification(ctx, command, reason, pi);
-  // Do not abort the session. Return the block to the agent so it can
-  // choose a safer command instead of seeing "This operation was aborted".
+  if (abortTurn) ctx.abort();
   return { block: true, reason };
 }
 
@@ -1224,7 +1244,7 @@ export default function (pi: ExtensionAPI) {
     if (blockedSegment) {
       const reason = `Command segment matches blocked pattern: ${blockedSegment}`;
       debugNotify(ctx, settings, `Blocked: ${reason}`);
-      return await blockAndStop(ctx, command, reason, pi);
+      return await blockCommand(ctx, command, reason, pi);
     }
 
     if (parsed.requiresConfirmation) {
@@ -1267,14 +1287,9 @@ export default function (pi: ExtensionAPI) {
 
     const autoAcceptEnabledByConfig = config.autoAccept?.enabled === true;
     const autoAcceptSessionOverride = getAutoAcceptSessionOverride(ctx);
-    const hasAutoAcceptModel = Boolean(
-      (config.autoAccept?.model ?? "").trim() || ctx.model,
-    );
-    // Hosts without a confirmation UI (print, RPC, BB) use auto-accept as
-    // the confirmation path when a model is available.
     const autoAcceptEnabled = autoAcceptSessionOverride
       ? autoAcceptSessionOverride === "on"
-      : autoAcceptEnabledByConfig || (!ctx.hasUI && hasAutoAcceptModel);
+      : autoAcceptEnabledByConfig;
     const autoAcceptStrictnessByConfig = normalizeAutoAcceptStrictness(config.autoAccept?.strictness);
     const autoAcceptStrictnessSessionOverride = getAutoAcceptStrictnessSessionOverride(ctx);
     const autoAcceptStrictness = autoAcceptStrictnessSessionOverride ?? autoAcceptStrictnessByConfig;
@@ -1296,38 +1311,38 @@ export default function (pi: ExtensionAPI) {
         const request = autoAccept.request;
 
         if (!ctx.hasUI) {
-          // No dialog exists. Wait for the model instead of the TUI grace period.
-          const evaluation = await request.response;
-          if (evaluation.result?.decision === "allow") {
-            debugNotify(
-              ctx,
-              settings,
-              `auto-accept allowed command via ${evaluation.result.modelRef}: ${evaluation.result.reason}`,
-            );
-            ctx.ui.notify(`auto-accept allowed command: ${evaluation.result.reason}`, "info");
-            return undefined;
-          }
-          if (evaluation.result) {
-            debugNotify(
-              ctx,
-              settings,
-              `auto-accept requested review via ${evaluation.result.modelRef}: ${evaluation.result.reason}`,
-            );
-            pendingReviewReason = `auto-accept requested review: ${evaluation.result.reason}`;
-          } else if (evaluation.error) {
-            ctx.ui.notify(`auto-accept unavailable: ${evaluation.error}`, "warning");
-            pendingReviewReason = `auto-accept unavailable: ${evaluation.error}`;
+          // No dialog exists. Use timeoutMs as a hard response deadline.
+          const waitResult = await waitForAutoAccept(request);
+
+          if (waitResult.type === "timeout") {
+            request.cancel();
+            pendingReviewReason = `auto-accept timed out after ${request.timeoutMs}ms`;
+          } else {
+            request.cancel();
+            const evaluation = waitResult.evaluation;
+            if (evaluation.result?.decision === "allow") {
+              debugNotify(
+                ctx,
+                settings,
+                `auto-accept allowed command via ${evaluation.result.modelRef}: ${evaluation.result.reason}`,
+              );
+              ctx.ui.notify(`auto-accept allowed command: ${evaluation.result.reason}`, "info");
+              return undefined;
+            }
+            if (evaluation.result) {
+              debugNotify(
+                ctx,
+                settings,
+                `auto-accept requested review via ${evaluation.result.modelRef}: ${evaluation.result.reason}`,
+              );
+              pendingReviewReason = `auto-accept requested review: ${evaluation.result.reason}`;
+            } else if (evaluation.error) {
+              ctx.ui.notify(`auto-accept unavailable: ${evaluation.error}`, "warning");
+              pendingReviewReason = `auto-accept unavailable: ${evaluation.error}`;
+            }
           }
         } else {
-          let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-          const waitResult = await new Promise<
-            | { type: "response"; evaluation: AutoAcceptEvaluation }
-            | { type: "timeout" }
-          >((resolve) => {
-            timeoutHandle = setTimeout(() => resolve({ type: "timeout" }), request.timeoutMs);
-            void request.response.then((evaluation) => resolve({ type: "response", evaluation }));
-          });
-          if (timeoutHandle) clearTimeout(timeoutHandle);
+          const waitResult = await waitForAutoAccept(request);
 
           if (waitResult.type === "response") {
             request.cancel();
@@ -1351,9 +1366,9 @@ export default function (pi: ExtensionAPI) {
             } else if (autoAccept.error) {
               ctx.ui.notify(`auto-accept unavailable: ${autoAccept.error}`, "warning");
             }
-          } else {
-            // Do not cancel at the grace-period deadline. If the model later
-            // returns allow, an active confirmation dialog will be dismissed.
+          } else if (ctx.mode === "tui") {
+            // Keep the request active while the TUI confirmation dialog is open.
+            // A late allow decision can dismiss that dialog.
             pendingAutoAcceptRequest = request;
             pendingAutoAcceptResponse = request.response;
             debugNotify(
@@ -1361,6 +1376,11 @@ export default function (pi: ExtensionAPI) {
               settings,
               `auto-accept exceeded ${request.timeoutMs}ms; showing manual review while the model request continues`,
             );
+          } else {
+            // RPC has a confirmation UI, but it cannot dismiss a standard
+            // dialog from this custom late-response path.
+            request.cancel();
+            pendingReviewReason = `auto-accept timed out after ${request.timeoutMs}ms`;
           }
         }
       } else if (autoAccept.error) {
@@ -1373,7 +1393,7 @@ export default function (pi: ExtensionAPI) {
     // agent can try a different command.
     if (!ctx.hasUI) {
       debugNotify(ctx, settings, `Blocked: ${pendingReviewReason}`);
-      return await blockAndStop(ctx, command, pendingReviewReason, pi);
+      return await blockCommand(ctx, command, pendingReviewReason, pi);
     }
 
     // Send notification that dialog is being shown
@@ -1383,13 +1403,31 @@ export default function (pi: ExtensionAPI) {
     // Ring terminal bell to draw attention while waiting for user confirmation.
     ringTerminalBell();
 
-    // Show confirmation dialog
+    // Show a full custom dialog in TUI and standard dialogs in RPC.
     const genericPreview = tokenizeWithExamples(command);
+    const options = [
+      { value: "allow", label: "Allow", description: "Execute the command as-is" },
+      { value: "always-accept", label: "Always Accept (Exact)", description: "Whitelist this exact command and execute" },
+      { value: "always-accept-generic", label: "Always Accept (Generic)", description: "Generate a regex pattern whitelist entry" },
+      { value: "edit", label: "Edit", description: "Modify the command before execution" },
+      { value: "block", label: "Block", description: "Cancel this command" },
+    ];
+    let result: string | undefined;
     let dialogOpen = true;
     let dialogSettled = false;
     let dismissDialog: (() => void) | undefined;
 
-    const result = await ctx.ui.custom((tui, theme, _kb, done) => {
+    if (ctx.mode === "rpc") {
+      const rpcOptions = options.map(option => `${option.label} — ${option.description}`);
+      const selected = await ctx.ui.select(
+        `Bash command confirmation\n\nCommand: ${command}\nDirectory: ${ctx.cwd}`,
+        rpcOptions,
+      );
+      result = selected
+        ? options[rpcOptions.indexOf(selected)]?.value
+        : "cancel";
+    } else {
+      result = await ctx.ui.custom((tui, theme, _kb, done) => {
       const finish = (value: string) => {
         if (!dialogOpen || dialogSettled) return;
         dialogSettled = true;
@@ -1415,13 +1453,6 @@ export default function (pi: ExtensionAPI) {
       }
 
       let selectedIndex = 0;
-      const options = [
-        { value: "allow", label: "Allow", description: "Execute the command as-is" },
-        { value: "always-accept", label: "Always Accept (Exact)", description: "Whitelist this exact command and execute" },
-        { value: "always-accept-generic", label: "Always Accept (Generic)", description: "Generate a regex pattern whitelist entry" },
-        { value: "edit", label: "Edit", description: "Modify the command before execution" },
-        { value: "block", label: "Block", description: "Cancel this command" },
-      ];
 
       function handleInput(data: string) {
         if (data === "\u001B[B" || data === "\u0019") { // Down arrow or Ctrl+N
@@ -1513,7 +1544,8 @@ export default function (pi: ExtensionAPI) {
         invalidate: () => {},
         handleInput,
       };
-    }, { overlay: true, overlayOptions: { anchor: "bottom-center", width: "100%", maxHeight: "90%", margin: 1 } });
+      }, { overlay: true, overlayOptions: { anchor: "bottom-center", width: "100%", maxHeight: "90%", margin: 1 } });
+    }
     dialogOpen = false;
     pendingAutoAcceptRequest?.cancel();
 
@@ -1549,14 +1581,14 @@ export default function (pi: ExtensionAPI) {
         const editedPattern = await ctx.ui.editor("Edit generic whitelist regex (^...$):", generated.pattern);
         if (!editedPattern) {
           debugNotify(ctx, settings, "User cancelled generic pattern edit");
-          return await blockAndStop(ctx, command, "Generic pattern edit cancelled", pi);
+          return await blockCommand(ctx, command, "Generic pattern edit cancelled", pi, true);
         }
 
         const validation = validateWhitelistPattern(editedPattern);
         if (validation.ok === false) {
           const reason = validation.reason;
           ctx.ui.notify(`Invalid generic pattern: ${reason}`, "warning");
-          return await blockAndStop(ctx, command, `Invalid generic pattern: ${reason}`, pi);
+          return await blockCommand(ctx, command, `Invalid generic pattern: ${reason}`, pi, true);
         }
 
         const added = addPatternToWhitelist(ctx.cwd, editedPattern, "Always accept generic", "ai");
@@ -1571,17 +1603,17 @@ export default function (pi: ExtensionAPI) {
       }
       case "cancel":
         debugNotify(ctx, settings, "User cancelled confirmation dialog via ESC");
-        return await blockAndStop(ctx, command, "Confirmation cancelled by user", pi);
+        return await blockCommand(ctx, command, "Confirmation cancelled by user", pi, true);
       case "block":
         debugNotify(ctx, settings, "User blocked command");
-        return await blockAndStop(ctx, command, "Blocked by user", pi);
+        return await blockCommand(ctx, command, "Blocked by user", pi, true);
       case "edit":
         debugNotify(ctx, settings, "User chose to edit command");
         // Open editor for modification
         const edited = await ctx.ui.editor("Edit command:", command);
         if (!edited) {
           debugNotify(ctx, settings, "User cancelled edit");
-          return await blockAndStop(ctx, command, "Edit cancelled", pi);
+          return await blockCommand(ctx, command, "Edit cancelled", pi, true);
         }
         await sendModifiedNotification(ctx, command, edited, pi);
         // Update command and allow execution
@@ -1589,7 +1621,7 @@ export default function (pi: ExtensionAPI) {
         return undefined;
       default:
         debugNotify(ctx, settings, "No selection - blocking");
-        return await blockAndStop(ctx, command, "No selection", pi);
+        return await blockCommand(ctx, command, "No selection", pi, true);
     }
   });
 

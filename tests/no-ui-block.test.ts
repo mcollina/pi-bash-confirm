@@ -130,8 +130,8 @@ test("no-UI auto-accept review returns the model reason and does not abort", asy
   }
 });
 
-test("no-UI waits for a late auto-accept allow", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "bash-confirm-noui-late-"));
+test("no-UI blocks when auto-accept exceeds the hard deadline", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "bash-confirm-noui-timeout-"));
   isolateAgentDir(t, tempDir);
   const faux = registerFauxProvider();
   mkdirSync(join(tempDir, ".pi"));
@@ -156,7 +156,7 @@ test("no-UI waits for a late auto-accept allow", async (t) => {
     ]);
     const toolCallHandler = createPi();
     const { ctx, abortCount } = noUiCtx(tempDir, {
-      sessionId: "no-ui-late",
+      sessionId: "no-ui-timeout",
       model: faux.getModel(),
       modelRegistry: {
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "", headers: {}, env: {} }),
@@ -168,7 +168,10 @@ test("no-UI waits for a late auto-accept allow", async (t) => {
       ctx,
     );
 
-    assert.equal(result, undefined);
+    assert.deepEqual(result, {
+      block: true,
+      reason: "auto-accept timed out after 1000ms",
+    });
     assert.equal(abortCount(), 0);
   } finally {
     faux.unregister();
@@ -176,8 +179,8 @@ test("no-UI waits for a late auto-accept allow", async (t) => {
   }
 });
 
-test("no-UI uses auto-accept when it is off in settings but a model is available", async (t) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "bash-confirm-noui-implicit-"));
+test("no-UI respects disabled auto-accept when a model is available", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "bash-confirm-noui-disabled-"));
   isolateAgentDir(t, tempDir);
   const faux = registerFauxProvider();
   mkdirSync(join(tempDir, ".pi"));
@@ -193,12 +196,16 @@ test("no-UI uses auto-accept when it is off in settings but a model is available
   );
 
   try {
+    let evaluationCount = 0;
     faux.setResponses([
-      () => fauxAssistantMessage('{"decision":"allow","reason":"safe local command"}'),
+      () => {
+        evaluationCount++;
+        return fauxAssistantMessage('{"decision":"allow","reason":"safe local command"}');
+      },
     ]);
     const toolCallHandler = createPi();
     const { ctx, abortCount } = noUiCtx(tempDir, {
-      sessionId: "no-ui-implicit",
+      sessionId: "no-ui-disabled",
       model: faux.getModel(),
       modelRegistry: {
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "", headers: {}, env: {} }),
@@ -210,10 +217,93 @@ test("no-UI uses auto-accept when it is off in settings but a model is available
       ctx,
     );
 
-    assert.equal(result, undefined);
+    assert.deepEqual(result, {
+      block: true,
+      reason: "Confirmation required",
+    });
+    assert.equal(evaluationCount, 0);
     assert.equal(abortCount(), 0);
   } finally {
     faux.unregister();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("RPC uses standard selection UI instead of custom TUI UI", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "bash-confirm-rpc-allow-"));
+  isolateAgentDir(t, tempDir);
+
+  try {
+    const toolCallHandler = createPi();
+    let abortCount = 0;
+    let selectCount = 0;
+    const ctx = {
+      cwd: tempDir,
+      sessionId: "rpc-allow",
+      mode: "rpc",
+      hasUI: true,
+      ui: {
+        notify() {},
+        async select(_title: string, options: string[]) {
+          selectCount++;
+          return options.find(option => option.startsWith("Allow —"));
+        },
+        async custom() {
+          throw new Error("RPC must not use custom TUI UI");
+        },
+      },
+      abort() {
+        abortCount++;
+      },
+    };
+
+    const result = await toolCallHandler(
+      { toolName: "bash", input: { command: "printf risky" } },
+      ctx,
+    );
+
+    assert.equal(result, undefined);
+    assert.equal(selectCount, 1);
+    assert.equal(abortCount, 0);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("RPC explicit block aborts the turn", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "bash-confirm-rpc-block-"));
+  isolateAgentDir(t, tempDir);
+
+  try {
+    const toolCallHandler = createPi();
+    let abortCount = 0;
+    const ctx = {
+      cwd: tempDir,
+      sessionId: "rpc-block",
+      mode: "rpc",
+      hasUI: true,
+      ui: {
+        notify() {},
+        async select(_title: string, options: string[]) {
+          return options.find(option => option.startsWith("Block —"));
+        },
+        async custom() {
+          throw new Error("RPC must not use custom TUI UI");
+        },
+      },
+      abort() {
+        abortCount++;
+      },
+    };
+
+    const result = await toolCallHandler(
+      { toolName: "bash", input: { command: "printf risky" } },
+      ctx,
+    );
+
+    assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+    assert.equal(abortCount, 1);
+  } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
