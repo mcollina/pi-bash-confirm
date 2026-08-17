@@ -1156,7 +1156,8 @@ async function blockAndStop(
   pi: ExtensionAPI
 ): Promise<{ block: true; reason: string }> {
   await sendBlockedNotification(ctx, command, reason, pi);
-  ctx.abort();
+  // Do not abort the session. Return the block to the agent so it can
+  // choose a safer command instead of seeing "This operation was aborted".
   return { block: true, reason };
 }
 
@@ -1258,8 +1259,11 @@ export default function (pi: ExtensionAPI) {
       matchesRegexList(trimmedCommand, autoAcceptNeverAllowPatterns) ||
       segmentsToCheck.some(segment => matchesRegexList(segment, autoAcceptNeverAllowPatterns));
 
+    let pendingReviewReason = "Confirmation required (no UI available)";
     if (matchesNeverAllowPattern) {
       debugNotify(ctx, settings, "auto-accept bypassed: command matched autoAccept.neverAllowPatterns");
+      pendingReviewReason =
+        "Command matched autoAccept.neverAllowPatterns; confirmation required (no UI available)";
     }
 
     const autoAcceptEnabledByConfig = config.autoAccept?.enabled === true;
@@ -1315,14 +1319,20 @@ export default function (pi: ExtensionAPI) {
               settings,
               `auto-accept requested manual review via ${autoAccept.result.modelRef}: ${autoAccept.result.reason}`,
             );
+            pendingReviewReason =
+              `auto-accept requested review: ${autoAccept.result.reason}; confirmation required (no UI available)`;
           } else if (autoAccept.error) {
             ctx.ui.notify(`auto-accept unavailable: ${autoAccept.error}`, "warning");
+            pendingReviewReason =
+              `auto-accept unavailable: ${autoAccept.error}; confirmation required (no UI available)`;
           }
         } else {
           // Do not cancel at the grace-period deadline. If the model later
           // returns allow, an active confirmation dialog will be dismissed.
           pendingAutoAcceptRequest = request;
           pendingAutoAcceptResponse = request.response;
+          pendingReviewReason =
+            "auto-accept timed out; confirmation required (no UI available)";
           debugNotify(
             ctx,
             settings,
@@ -1331,15 +1341,17 @@ export default function (pi: ExtensionAPI) {
         }
       } else if (autoAccept.error) {
         ctx.ui.notify(`auto-accept unavailable: ${autoAccept.error}`, "warning");
+        pendingReviewReason =
+          `auto-accept unavailable: ${autoAccept.error}; confirmation required (no UI available)`;
       }
     }
 
-    // No UI available - block for safety
+    // No UI available - block for safety, but keep the turn alive so the
+    // agent receives the reason and can try a different command.
     if (!ctx.hasUI) {
       pendingAutoAcceptRequest?.cancel();
-      const reason = "Confirmation required (no UI available)";
-      debugNotify(ctx, settings, `Blocked: ${reason}`);
-      return await blockAndStop(ctx, command, reason, pi);
+      debugNotify(ctx, settings, `Blocked: ${pendingReviewReason}`);
+      return await blockAndStop(ctx, command, pendingReviewReason, pi);
     }
 
     // Send notification that dialog is being shown

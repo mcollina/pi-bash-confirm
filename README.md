@@ -11,7 +11,7 @@ A [pi](https://github.com/earendil-works/pi) package that adds a confirmation di
 - **Edit Mode**: Modify commands before approval using pi's built-in editor
 - **Telegram Notifications**: Get notified when commands are blocked or modified
 - **Optional auto-accept Mode**: Let a configurable fast model auto-allow or route to manual review
-- **Non-Interactive Safety**: Blocks commands when UI is unavailable unless they match safe patterns (or auto-accept explicitly allows)
+- **Non-Interactive Safety**: Blocks commands when UI is unavailable unless they match safe patterns (or auto-accept explicitly allows). The agent receives the block reason and can try another command; the session is not aborted.
 - **Easy Configuration**: All settings configurable via `settings.json` or environment variables
 
 ## Installation
@@ -506,6 +506,8 @@ When pi is running in non-interactive mode (print, JSON, RPC), the extension wil
 - Block all bash commands unless they match a `safeCommands` pattern
 - If `auto-accept` is enabled, run model review first (`allow`/`review`)
 - Block when manual confirmation is required but no UI is available
+- Return `{ block: true, reason }` to the agent without aborting the session
+- Include why review was required (`neverAllowPatterns`, auto-accept review, timeout, or missing UI)
 - Send blocked command notifications (if configured)
 
 To allow commands in non-interactive mode, add them to `safeCommands` or enable `auto-accept` with a conservative fast model.

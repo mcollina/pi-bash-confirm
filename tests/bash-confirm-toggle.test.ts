@@ -79,5 +79,5 @@ test("/bash-confirm toggles confirmation from one settings panel", async (t) => 
     block: true,
     reason: "Confirmation required (no UI available)",
   });
-  assert.equal(abortCount, 1);
+  assert.equal(abortCount, 0);
 });
