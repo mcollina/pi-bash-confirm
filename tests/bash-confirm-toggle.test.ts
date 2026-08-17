@@ -77,7 +77,7 @@ test("/bash-confirm toggles confirmation from one settings panel", async (t) => 
   await commandHandler("", commandCtx);
   assert.deepEqual(await toolCallHandler(event, toolCtx), {
     block: true,
-    reason: "Confirmation required (no UI available)",
+    reason: "Confirmation required",
   });
   assert.equal(abortCount, 0);
 });

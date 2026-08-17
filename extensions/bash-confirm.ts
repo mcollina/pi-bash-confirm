@@ -1259,18 +1259,22 @@ export default function (pi: ExtensionAPI) {
       matchesRegexList(trimmedCommand, autoAcceptNeverAllowPatterns) ||
       segmentsToCheck.some(segment => matchesRegexList(segment, autoAcceptNeverAllowPatterns));
 
-    let pendingReviewReason = "Confirmation required (no UI available)";
+    let pendingReviewReason = "Confirmation required";
     if (matchesNeverAllowPattern) {
       debugNotify(ctx, settings, "auto-accept bypassed: command matched autoAccept.neverAllowPatterns");
-      pendingReviewReason =
-        "Command matched autoAccept.neverAllowPatterns; confirmation required (no UI available)";
+      pendingReviewReason = "Command matched autoAccept.neverAllowPatterns";
     }
 
     const autoAcceptEnabledByConfig = config.autoAccept?.enabled === true;
     const autoAcceptSessionOverride = getAutoAcceptSessionOverride(ctx);
+    const hasAutoAcceptModel = Boolean(
+      (config.autoAccept?.model ?? "").trim() || ctx.model,
+    );
+    // Hosts without a confirmation UI (print, RPC, BB) use auto-accept as
+    // the confirmation path when a model is available.
     const autoAcceptEnabled = autoAcceptSessionOverride
       ? autoAcceptSessionOverride === "on"
-      : autoAcceptEnabledByConfig;
+      : autoAcceptEnabledByConfig || (!ctx.hasUI && hasAutoAcceptModel);
     const autoAcceptStrictnessByConfig = normalizeAutoAcceptStrictness(config.autoAccept?.strictness);
     const autoAcceptStrictnessSessionOverride = getAutoAcceptStrictnessSessionOverride(ctx);
     const autoAcceptStrictness = autoAcceptStrictnessSessionOverride ?? autoAcceptStrictnessByConfig;
@@ -1290,66 +1294,84 @@ export default function (pi: ExtensionAPI) {
       const autoAccept = await createAutoAcceptRequest(command, ctx, settings, autoAcceptStrictness);
       if (autoAccept.request) {
         const request = autoAccept.request;
-        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-        const waitResult = await new Promise<
-          | { type: "response"; evaluation: AutoAcceptEvaluation }
-          | { type: "timeout" }
-        >((resolve) => {
-          timeoutHandle = setTimeout(() => resolve({ type: "timeout" }), request.timeoutMs);
-          void request.response.then((evaluation) => resolve({ type: "response", evaluation }));
-        });
-        if (timeoutHandle) clearTimeout(timeoutHandle);
 
-        if (waitResult.type === "response") {
-          request.cancel();
-          const autoAccept = waitResult.evaluation;
-          if (autoAccept.result) {
-            if (autoAccept.result.decision === "allow") {
-              debugNotify(
-                ctx,
-                settings,
-                `auto-accept allowed command via ${autoAccept.result.modelRef}: ${autoAccept.result.reason}`,
-              );
-              ctx.ui.notify(`auto-accept allowed command: ${autoAccept.result.reason}`, "info");
-              return undefined;
-            }
-
+        if (!ctx.hasUI) {
+          // No dialog exists. Wait for the model instead of the TUI grace period.
+          const evaluation = await request.response;
+          if (evaluation.result?.decision === "allow") {
             debugNotify(
               ctx,
               settings,
-              `auto-accept requested manual review via ${autoAccept.result.modelRef}: ${autoAccept.result.reason}`,
+              `auto-accept allowed command via ${evaluation.result.modelRef}: ${evaluation.result.reason}`,
             );
-            pendingReviewReason =
-              `auto-accept requested review: ${autoAccept.result.reason}; confirmation required (no UI available)`;
-          } else if (autoAccept.error) {
-            ctx.ui.notify(`auto-accept unavailable: ${autoAccept.error}`, "warning");
-            pendingReviewReason =
-              `auto-accept unavailable: ${autoAccept.error}; confirmation required (no UI available)`;
+            ctx.ui.notify(`auto-accept allowed command: ${evaluation.result.reason}`, "info");
+            return undefined;
+          }
+          if (evaluation.result) {
+            debugNotify(
+              ctx,
+              settings,
+              `auto-accept requested review via ${evaluation.result.modelRef}: ${evaluation.result.reason}`,
+            );
+            pendingReviewReason = `auto-accept requested review: ${evaluation.result.reason}`;
+          } else if (evaluation.error) {
+            ctx.ui.notify(`auto-accept unavailable: ${evaluation.error}`, "warning");
+            pendingReviewReason = `auto-accept unavailable: ${evaluation.error}`;
           }
         } else {
-          // Do not cancel at the grace-period deadline. If the model later
-          // returns allow, an active confirmation dialog will be dismissed.
-          pendingAutoAcceptRequest = request;
-          pendingAutoAcceptResponse = request.response;
-          pendingReviewReason =
-            "auto-accept timed out; confirmation required (no UI available)";
-          debugNotify(
-            ctx,
-            settings,
-            `auto-accept exceeded ${request.timeoutMs}ms; showing manual review while the model request continues`,
-          );
+          let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+          const waitResult = await new Promise<
+            | { type: "response"; evaluation: AutoAcceptEvaluation }
+            | { type: "timeout" }
+          >((resolve) => {
+            timeoutHandle = setTimeout(() => resolve({ type: "timeout" }), request.timeoutMs);
+            void request.response.then((evaluation) => resolve({ type: "response", evaluation }));
+          });
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+
+          if (waitResult.type === "response") {
+            request.cancel();
+            const autoAccept = waitResult.evaluation;
+            if (autoAccept.result) {
+              if (autoAccept.result.decision === "allow") {
+                debugNotify(
+                  ctx,
+                  settings,
+                  `auto-accept allowed command via ${autoAccept.result.modelRef}: ${autoAccept.result.reason}`,
+                );
+                ctx.ui.notify(`auto-accept allowed command: ${autoAccept.result.reason}`, "info");
+                return undefined;
+              }
+
+              debugNotify(
+                ctx,
+                settings,
+                `auto-accept requested manual review via ${autoAccept.result.modelRef}: ${autoAccept.result.reason}`,
+              );
+            } else if (autoAccept.error) {
+              ctx.ui.notify(`auto-accept unavailable: ${autoAccept.error}`, "warning");
+            }
+          } else {
+            // Do not cancel at the grace-period deadline. If the model later
+            // returns allow, an active confirmation dialog will be dismissed.
+            pendingAutoAcceptRequest = request;
+            pendingAutoAcceptResponse = request.response;
+            debugNotify(
+              ctx,
+              settings,
+              `auto-accept exceeded ${request.timeoutMs}ms; showing manual review while the model request continues`,
+            );
+          }
         }
       } else if (autoAccept.error) {
         ctx.ui.notify(`auto-accept unavailable: ${autoAccept.error}`, "warning");
-        pendingReviewReason =
-          `auto-accept unavailable: ${autoAccept.error}; confirmation required (no UI available)`;
+        pendingReviewReason = `auto-accept unavailable: ${autoAccept.error}`;
       }
     }
 
-    // No UI available - block for safety, but keep the turn alive so the
-    // agent receives the reason and can try a different command.
+    // No confirmation UI. Return the reason and keep the turn alive so the
+    // agent can try a different command.
     if (!ctx.hasUI) {
-      pendingAutoAcceptRequest?.cancel();
       debugNotify(ctx, settings, `Blocked: ${pendingReviewReason}`);
       return await blockAndStop(ctx, command, pendingReviewReason, pi);
     }

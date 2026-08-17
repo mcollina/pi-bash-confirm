@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
@@ -8,9 +8,20 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import bashConfirm from "../extensions/bash-confirm.ts";
 
-test("/bash-confirm-allow-directory adds a directory to auto-accept prompts for the session", async () => {
+function userMessageText(message: any): string {
+  if (typeof message?.content === "string") return message.content;
+  if (!Array.isArray(message?.content)) return "";
+  return message.content
+    .filter((block: any) => block?.type === "text" && typeof block.text === "string")
+    .map((block: any) => block.text)
+    .join("");
+}
+
+test("/bash-confirm-allow-directory adds a directory to auto-accept prompts for the session", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "bash-confirm-allowed-directory-"));
   const additionalDirectory = join(tempDir, "shared-output");
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(tempDir, "agent");
   const faux = registerFauxProvider();
   mkdirSync(join(tempDir, ".pi"));
   mkdirSync(additionalDirectory);
@@ -18,6 +29,14 @@ test("/bash-confirm-allow-directory adds a directory to auto-accept prompts for 
     join(tempDir, ".pi", "settings.json"),
     JSON.stringify({ bashConfirm: { autoAccept: { enabled: true } } }),
   );
+
+  t.after(() => {
+    if (previousAgentDir === undefined) {
+      delete process.env.PI_CODING_AGENT_DIR;
+    } else {
+      process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    }
+  });
 
   let prompt = "";
   let toolCallHandler: ((event: any, ctx: any) => Promise<unknown>) | undefined;
@@ -35,7 +54,7 @@ test("/bash-confirm-allow-directory adds a directory to auto-accept prompts for 
     faux.setResponses([
       (context: any) => {
         const userMessage = context.messages.find((message: any) => message.role === "user");
-        prompt = typeof userMessage?.content === "string" ? userMessage.content : "";
+        prompt = userMessageText(userMessage);
         return fauxAssistantMessage('{"decision":"allow","reason":"safe local command"}');
       },
     ]);
@@ -66,8 +85,9 @@ test("/bash-confirm-allow-directory adds a directory to auto-accept prompts for 
     const result = await toolCallHandler({ toolName: "bash", input: { command: "printf ok" } }, ctx);
 
     assert.equal(result, undefined);
-    assert.ok(prompt.includes(JSON.stringify(additionalDirectory)));
-    assert.ok(notifications.some(message => message.includes(`Allowed directory for this session: ${additionalDirectory}`)));
+    const resolvedDirectory = realpathSync(additionalDirectory);
+    assert.ok(prompt.includes(JSON.stringify(resolvedDirectory)));
+    assert.ok(notifications.some(message => message.includes(`Allowed directory for this session: ${resolvedDirectory}`)));
   } finally {
     faux.unregister();
     rmSync(tempDir, { recursive: true, force: true });

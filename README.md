@@ -11,7 +11,7 @@ A [pi](https://github.com/earendil-works/pi) package that adds a confirmation di
 - **Edit Mode**: Modify commands before approval using pi's built-in editor
 - **Telegram Notifications**: Get notified when commands are blocked or modified
 - **Optional auto-accept Mode**: Let a configurable fast model auto-allow or route to manual review
-- **Non-Interactive Safety**: Blocks commands when UI is unavailable unless they match safe patterns (or auto-accept explicitly allows). The agent receives the block reason and can try another command; the session is not aborted.
+- **Non-Interactive Safety**: In hosts without a confirmation UI (print, JSON, RPC, BB), auto-accept is the confirmation path. The extension waits for the model, then allows the command or returns a block reason. The session is not aborted.
 - **Easy Configuration**: All settings configurable via `settings.json` or environment variables
 
 ## Installation
@@ -397,7 +397,7 @@ When `bashConfirm.autoAccept.enabled` is `true`, commands that would normally op
 
 The model must return one of:
 - `allow` → command executes immediately
-- `review` → fallback to the normal confirmation dialog (or block in non-interactive mode)
+- `review` → confirmation dialog in TUI; block with the model reason when there is no UI
 
 If the model returns `block`, the extension downgrades that to `review` and asks a human.
 
@@ -501,16 +501,17 @@ Settings are loaded in this order (later overrides earlier):
 
 ## Non-Interactive Mode
 
-When pi is running in non-interactive mode (print, JSON, RPC), the extension will:
+When the host has no confirmation UI (print, JSON, RPC, BB), the extension treats auto-accept as the confirmation path:
 
-- Block all bash commands unless they match a `safeCommands` pattern
-- If `auto-accept` is enabled, run model review first (`allow`/`review`)
-- Block when manual confirmation is required but no UI is available
-- Return `{ block: true, reason }` to the agent without aborting the session
-- Include why review was required (`neverAllowPatterns`, auto-accept review, timeout, or missing UI)
+- Allow commands that match `safeCommands` or the project whitelist
+- If a model is available, wait for auto-accept. Do not apply the TUI grace-period timeout
+- `allow` runs the command
+- `review`, `neverAllowPatterns`, and auto-accept errors return `{ block: true, reason }` to the agent
+- The session is not aborted, so the agent can try a safer command
 - Send blocked command notifications (if configured)
 
-To allow commands in non-interactive mode, add them to `safeCommands` or enable `auto-accept` with a conservative fast model.
+A session override of auto-accept `off` still blocks commands that need confirmation.
+Add frequent commands to `safeCommands` or the whitelist if you do not want a model call.
 
 ## Troubleshooting
 
