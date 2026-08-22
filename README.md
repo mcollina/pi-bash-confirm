@@ -11,7 +11,8 @@ A [pi](https://github.com/earendil-works/pi) package that confirms bash commands
 - **Edit Mode**: Modify commands before approval using pi's built-in editor
 - **Telegram Notifications**: Get notified when commands are blocked or modified
 - **Optional auto-accept Mode**: Let a configurable fast model auto-allow or route to manual review
-- **Non-Interactive Safety**: In hosts without a confirmation UI, commands are allowed only by safe patterns, the whitelist, or explicitly enabled auto-accept. Blocks return a reason without aborting the session.
+- **Non-Interactive Safety**: In hosts without a confirmation UI, commands are allowed only by safe patterns, the whitelist, or explicitly enabled auto-accept.
+- **Non-Aborting Blocks**: A block stops only the command. The extension returns the reason without aborting the agent turn.
 - **RPC Confirmation**: Use Pi's standard selection and editor protocol instead of TUI-only custom components.
 - **Easy Configuration**: All settings configurable via `settings.json` or environment variables
 
@@ -502,11 +503,20 @@ Settings are loaded in this order (later overrides earlier):
 3. Project settings (`.pi/settings.json`)
 4. Environment variables (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`)
 
+## Blocked Command Behavior
+
+A blocked command stops only that command.
+The extension returns `{ block: true, reason }` and does not call `ctx.abort()`.
+The agent turn remains active and can request another command.
+The extension cannot guarantee that the agent will retry, but it does not stop the agent from retrying.
+
+This rule applies to policy blocks, non-UI blocks, model review, model errors, timeouts, user blocks, dialog cancellation, and edit cancellation.
+
 ## RPC Mode
 
 RPC has a confirmation UI through Pi's extension UI protocol.
 The extension uses standard selection and editor dialogs because `ctx.ui.custom()` is TUI-only.
-An explicit user block aborts the current turn.
+A user block returns the reason and keeps the agent turn active.
 
 ## Non-Interactive Mode
 
@@ -517,7 +527,7 @@ When the host has no confirmation UI, such as print, JSON, or a BB integration w
 - Apply `timeoutMs` as a hard model-response deadline
 - Run the command when the model returns `allow`
 - Return `{ block: true, reason }` for `review`, `neverAllowPatterns`, timeouts, and auto-accept errors
-- Keep the session active so the agent can try a safer command
+- Keep the agent turn active so the agent can try a safer command
 - Send blocked command notifications when configured
 
 Add frequent commands to `safeCommands` or the whitelist if you do not want a model call.

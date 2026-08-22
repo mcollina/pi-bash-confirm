@@ -1,6 +1,15 @@
 import { getSettingsListTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
-import { Container, type SettingItem, SettingsList, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import {
+  Container,
+  decodeKittyPrintable,
+  Key,
+  matchesKey,
+  type SettingItem,
+  SettingsList,
+  Text,
+  wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import https from "node:https";
 import { splitCommand } from "./command-splitter.ts";
 import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -1174,10 +1183,10 @@ async function blockCommand(
   command: string,
   reason: string,
   pi: ExtensionAPI,
-  abortTurn = false,
 ): Promise<{ block: true; reason: string }> {
   await sendBlockedNotification(ctx, command, reason, pi);
-  if (abortTurn) ctx.abort();
+  // A block stops only this command. Pi returns the reason to the agent,
+  // which keeps the current turn active for another tool call.
   return { block: true, reason };
 }
 
@@ -1279,10 +1288,14 @@ export default function (pi: ExtensionAPI) {
       matchesRegexList(trimmedCommand, autoAcceptNeverAllowPatterns) ||
       segmentsToCheck.some(segment => matchesRegexList(segment, autoAcceptNeverAllowPatterns));
 
-    let pendingReviewReason = "Confirmation required";
+    let pendingReviewReason = ctx.hasUI
+      ? "Confirmation required"
+      : "Command requires confirmation, but this host has no confirmation UI";
     if (matchesNeverAllowPattern) {
       debugNotify(ctx, settings, "auto-accept bypassed: command matched autoAccept.neverAllowPatterns");
-      pendingReviewReason = "Command matched autoAccept.neverAllowPatterns";
+      pendingReviewReason = ctx.hasUI
+        ? "Command matched autoAccept.neverAllowPatterns"
+        : "Command matched autoAccept.neverAllowPatterns and requires manual confirmation, but this host has no confirmation UI";
     }
 
     const autoAcceptEnabledByConfig = config.autoAccept?.enabled === true;
@@ -1335,10 +1348,12 @@ export default function (pi: ExtensionAPI) {
                 settings,
                 `auto-accept requested review via ${evaluation.result.modelRef}: ${evaluation.result.reason}`,
               );
-              pendingReviewReason = `auto-accept requested review: ${evaluation.result.reason}`;
+              pendingReviewReason =
+                `auto-accept requested review: ${evaluation.result.reason}; this host has no confirmation UI`;
             } else if (evaluation.error) {
               ctx.ui.notify(`auto-accept unavailable: ${evaluation.error}`, "warning");
-              pendingReviewReason = `auto-accept unavailable: ${evaluation.error}`;
+              pendingReviewReason =
+                `auto-accept unavailable: ${evaluation.error}; this host has no confirmation UI`;
             }
           }
         } else {
@@ -1385,7 +1400,9 @@ export default function (pi: ExtensionAPI) {
         }
       } else if (autoAccept.error) {
         ctx.ui.notify(`auto-accept unavailable: ${autoAccept.error}`, "warning");
-        pendingReviewReason = `auto-accept unavailable: ${autoAccept.error}`;
+        pendingReviewReason = ctx.hasUI
+          ? `auto-accept unavailable: ${autoAccept.error}`
+          : `auto-accept unavailable: ${autoAccept.error}; this host has no confirmation UI`;
       }
     }
 
@@ -1455,18 +1472,20 @@ export default function (pi: ExtensionAPI) {
       let selectedIndex = 0;
 
       function handleInput(data: string) {
-        if (data === "\u001B[B" || data === "\u0019") { // Down arrow or Ctrl+N
+        if (matchesKey(data, Key.down) || matchesKey(data, Key.ctrl("n"))) {
           selectedIndex = Math.min(selectedIndex + 1, options.length - 1);
           tui.requestRender();
           return;
         }
-        if (data === "\u001B[A" || data === "\u0018") { // Up arrow or Ctrl+P
+        if (matchesKey(data, Key.up) || matchesKey(data, Key.ctrl("p"))) {
           selectedIndex = Math.max(selectedIndex - 1, 0);
           tui.requestRender();
           return;
         }
-        if (/^[1-9]$/.test(data)) {
-          const numericIndex = Number(data) - 1;
+
+        const printable = decodeKittyPrintable(data) ?? data;
+        if (/^[1-9]$/.test(printable)) {
+          const numericIndex = Number(printable) - 1;
           if (numericIndex >= 0 && numericIndex < options.length) {
             selectedIndex = numericIndex;
             tui.requestRender();
@@ -1474,11 +1493,11 @@ export default function (pi: ExtensionAPI) {
           }
           return;
         }
-        if (data === "\r" || data === "\n") { // Enter
+        if (matchesKey(data, Key.enter)) {
           finish(options[selectedIndex].value);
           return;
         }
-        if (data === "\u001B") { // Escape
+        if (matchesKey(data, Key.escape)) {
           finish("cancel");
         }
       }
@@ -1581,14 +1600,14 @@ export default function (pi: ExtensionAPI) {
         const editedPattern = await ctx.ui.editor("Edit generic whitelist regex (^...$):", generated.pattern);
         if (!editedPattern) {
           debugNotify(ctx, settings, "User cancelled generic pattern edit");
-          return await blockCommand(ctx, command, "Generic pattern edit cancelled", pi, true);
+          return await blockCommand(ctx, command, "Generic pattern edit cancelled", pi);
         }
 
         const validation = validateWhitelistPattern(editedPattern);
         if (validation.ok === false) {
           const reason = validation.reason;
           ctx.ui.notify(`Invalid generic pattern: ${reason}`, "warning");
-          return await blockCommand(ctx, command, `Invalid generic pattern: ${reason}`, pi, true);
+          return await blockCommand(ctx, command, `Invalid generic pattern: ${reason}`, pi);
         }
 
         const added = addPatternToWhitelist(ctx.cwd, editedPattern, "Always accept generic", "ai");
@@ -1603,17 +1622,17 @@ export default function (pi: ExtensionAPI) {
       }
       case "cancel":
         debugNotify(ctx, settings, "User cancelled confirmation dialog via ESC");
-        return await blockCommand(ctx, command, "Confirmation cancelled by user", pi, true);
+        return await blockCommand(ctx, command, "Confirmation cancelled by user", pi);
       case "block":
         debugNotify(ctx, settings, "User blocked command");
-        return await blockCommand(ctx, command, "Blocked by user", pi, true);
+        return await blockCommand(ctx, command, "Blocked by user", pi);
       case "edit":
         debugNotify(ctx, settings, "User chose to edit command");
         // Open editor for modification
         const edited = await ctx.ui.editor("Edit command:", command);
         if (!edited) {
           debugNotify(ctx, settings, "User cancelled edit");
-          return await blockCommand(ctx, command, "Edit cancelled", pi, true);
+          return await blockCommand(ctx, command, "Edit cancelled", pi);
         }
         await sendModifiedNotification(ctx, command, edited, pi);
         // Update command and allow execution
@@ -1621,7 +1640,7 @@ export default function (pi: ExtensionAPI) {
         return undefined;
       default:
         debugNotify(ctx, settings, "No selection - blocking");
-        return await blockCommand(ctx, command, "No selection", pi, true);
+        return await blockCommand(ctx, command, "No selection", pi);
     }
   });
 
