@@ -18,6 +18,15 @@ declare module "@earendil-works/pi-coding-agent" {
 
 declare module "@earendil-works/pi-tui" {
   export const Container: any;
+  export function decodeKittyPrintable(data: string): string | undefined;
+  export const Key: {
+    down: string;
+    enter: string;
+    escape: string;
+    up: string;
+    ctrl(key: string): string;
+  };
+  export function matchesKey(data: string, keyId: string): boolean;
   export type SettingItem = {
     id: string;
     label: string;
