@@ -506,9 +506,10 @@ When pi is running in non-interactive mode (print, JSON, RPC), the extension wil
 - Block all bash commands unless they match a `safeCommands` pattern
 - If `auto-accept` is enabled, run model review first (`allow`/`review`)
 - Block when manual confirmation is required but no UI is available
+- Return the blocked tool result without aborting the headless session, allowing clients such as `pi-subagents` to report the denial or recover
 - Send blocked command notifications (if configured)
 
-To allow commands in non-interactive mode, add them to `safeCommands` or enable `auto-accept` with a conservative fast model.
+The extension does not forward confirmation requests from a headless child to a parent TUI. To allow commands in non-interactive mode, add them to `safeCommands` or enable `auto-accept` with a conservative fast model.
 
 ## Troubleshooting
 

@@ -67,7 +67,7 @@ test("/bash-confirm toggles confirmation from one settings panel", async (t) => 
       abortCount++;
     },
   };
-  const toolCtx = { ...commandCtx, hasUI: false };
+  const toolCtx = { ...commandCtx, mode: "json", hasUI: false };
   const event = { toolName: "bash", input: { command: "printf risky" } };
 
   await commandHandler("", commandCtx);
@@ -79,5 +79,20 @@ test("/bash-confirm toggles confirmation from one settings panel", async (t) => 
     block: true,
     reason: "Confirmation required (no UI available)",
   });
-  assert.equal(abortCount, 1);
+  assert.equal(abortCount, 0, "headless blocks must not abort the host session");
+
+  const interactiveBlockCtx = {
+    ...commandCtx,
+    ui: {
+      ...commandCtx.ui,
+      async custom() {
+        return "block";
+      },
+    },
+  };
+  assert.deepEqual(await toolCallHandler(event, interactiveBlockCtx), {
+    block: true,
+    reason: "Blocked by user",
+  });
+  assert.equal(abortCount, 1, "interactive blocks should stop the active agent turn");
 });

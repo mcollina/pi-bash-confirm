@@ -1149,14 +1149,19 @@ async function sendModifiedNotification(
   }
 }
 
-async function blockAndStop(
+async function blockCommand(
   ctx: ExtensionContext,
   command: string,
   reason: string,
   pi: ExtensionAPI
 ): Promise<{ block: true; reason: string }> {
   await sendBlockedNotification(ctx, command, reason, pi);
-  ctx.abort();
+
+  // In headless sessions, aborting turns a blocked tool call into a failed
+  // request. Return the block result so subagents and other non-interactive
+  // clients can report the denial or recover without executing the command.
+  if (ctx.hasUI) ctx.abort();
+
   return { block: true, reason };
 }
 
@@ -1223,7 +1228,7 @@ export default function (pi: ExtensionAPI) {
     if (blockedSegment) {
       const reason = `Command segment matches blocked pattern: ${blockedSegment}`;
       debugNotify(ctx, settings, `Blocked: ${reason}`);
-      return await blockAndStop(ctx, command, reason, pi);
+      return await blockCommand(ctx, command, reason, pi);
     }
 
     if (parsed.requiresConfirmation) {
@@ -1339,7 +1344,7 @@ export default function (pi: ExtensionAPI) {
       pendingAutoAcceptRequest?.cancel();
       const reason = "Confirmation required (no UI available)";
       debugNotify(ctx, settings, `Blocked: ${reason}`);
-      return await blockAndStop(ctx, command, reason, pi);
+      return await blockCommand(ctx, command, reason, pi);
     }
 
     // Send notification that dialog is being shown
@@ -1515,14 +1520,14 @@ export default function (pi: ExtensionAPI) {
         const editedPattern = await ctx.ui.editor("Edit generic whitelist regex (^...$):", generated.pattern);
         if (!editedPattern) {
           debugNotify(ctx, settings, "User cancelled generic pattern edit");
-          return await blockAndStop(ctx, command, "Generic pattern edit cancelled", pi);
+          return await blockCommand(ctx, command, "Generic pattern edit cancelled", pi);
         }
 
         const validation = validateWhitelistPattern(editedPattern);
         if (validation.ok === false) {
           const reason = validation.reason;
           ctx.ui.notify(`Invalid generic pattern: ${reason}`, "warning");
-          return await blockAndStop(ctx, command, `Invalid generic pattern: ${reason}`, pi);
+          return await blockCommand(ctx, command, `Invalid generic pattern: ${reason}`, pi);
         }
 
         const added = addPatternToWhitelist(ctx.cwd, editedPattern, "Always accept generic", "ai");
@@ -1537,17 +1542,17 @@ export default function (pi: ExtensionAPI) {
       }
       case "cancel":
         debugNotify(ctx, settings, "User cancelled confirmation dialog via ESC");
-        return await blockAndStop(ctx, command, "Confirmation cancelled by user", pi);
+        return await blockCommand(ctx, command, "Confirmation cancelled by user", pi);
       case "block":
         debugNotify(ctx, settings, "User blocked command");
-        return await blockAndStop(ctx, command, "Blocked by user", pi);
+        return await blockCommand(ctx, command, "Blocked by user", pi);
       case "edit":
         debugNotify(ctx, settings, "User chose to edit command");
         // Open editor for modification
         const edited = await ctx.ui.editor("Edit command:", command);
         if (!edited) {
           debugNotify(ctx, settings, "User cancelled edit");
-          return await blockAndStop(ctx, command, "Edit cancelled", pi);
+          return await blockCommand(ctx, command, "Edit cancelled", pi);
         }
         await sendModifiedNotification(ctx, command, edited, pi);
         // Update command and allow execution
@@ -1555,7 +1560,7 @@ export default function (pi: ExtensionAPI) {
         return undefined;
       default:
         debugNotify(ctx, settings, "No selection - blocking");
-        return await blockAndStop(ctx, command, "No selection", pi);
+        return await blockCommand(ctx, command, "No selection", pi);
     }
   });
 
