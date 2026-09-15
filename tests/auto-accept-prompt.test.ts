@@ -1,12 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
-import { AUTO_ACCEPT_MAX_TOKENS, buildAutoAcceptPrompt } from "../extensions/bash-confirm.ts";
+import {
+  AUTO_ACCEPT_MAX_TOKENS,
+  AUTO_ACCEPT_SYSTEM_PROMPT,
+  buildAutoAcceptPrompt,
+} from "../extensions/bash-confirm.ts";
 
 const cwd = "/workspace/project";
 
 test("auto-accept reserves a generous reasoning and JSON output budget", () => {
   assert.equal(AUTO_ACCEPT_MAX_TOKENS, 4096);
+});
+
+test("auto-accept instructs models to always respond in English", () => {
+  assert.match(AUTO_ACCEPT_SYSTEM_PROMPT, /always respond in English/);
 });
 
 test("strict auto-accept ignores cd when applying policy scope", () => {

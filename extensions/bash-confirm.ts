@@ -443,7 +443,7 @@ type AutoAcceptResult = {
 };
 
 const AUTO_ACCEPT_MARKER = "[BASH_CONFIRM_AUTO_ACCEPT_V1]";
-export const AUTO_ACCEPT_SYSTEM_PROMPT = "You are a bash auto-accept policy evaluator. Apply the supplied policy exactly and output JSON only.";
+export const AUTO_ACCEPT_SYSTEM_PROMPT = "You are a bash auto-accept policy evaluator. Apply the supplied policy exactly, always respond in English, and output JSON only.";
 export const AUTO_ACCEPT_MAX_TOKENS = 4096;
 
 type BashConfirmSessionOverride = "on" | "off";
