@@ -638,7 +638,7 @@ export function buildAutoAcceptPrompt(
     "You are a security gate for bash command execution.",
     "Apply the policy exactly; do not require review merely because a command is chained or uses `cd`.",
     "Return ONLY JSON with shape:",
-    '{"decision":"allow|review","reason":"short explanation"}',
+    '{"decision":"allow|review","reason":"short explanation in English using ASCII characters only"}',
     "",
     `Strictness mode: ${strictness}`,
     "Shared policy:",
@@ -695,6 +695,20 @@ function extractAssistantTextFromContent(message: unknown): string {
   return chunks.join("").trim();
 }
 
+function getDefaultAutoAcceptReason(decision: "allow" | "review" | "block"): string {
+  if (decision === "allow") return "The command satisfies the auto-accept policy.";
+  if (decision === "block") return "The model requested that this command be blocked; falling back to manual review.";
+  return "The command requires manual review under the auto-accept policy.";
+}
+
+function normalizeAutoAcceptReason(reason: string, decision: "allow" | "review" | "block"): string {
+  const trimmed = reason.trim();
+  if (!trimmed || /[^\x09\x0A\x0D\x20-\x7E]/.test(trimmed)) {
+    return getDefaultAutoAcceptReason(decision);
+  }
+  return trimmed;
+}
+
 export function parseAutoAcceptDecision(text: string): { result?: AutoAcceptResult; error?: string } {
   const jsonText = extractFirstJsonObject(text);
   if (!jsonText) {
@@ -718,12 +732,9 @@ export function parseAutoAcceptDecision(text: string): { result?: AutoAcceptResu
     return { error: "Auto-accept decision must be one of allow|review" };
   }
 
-  const reasonRaw = typeof parsed.reason === "string" ? parsed.reason.trim() : "";
+  const reasonRaw = typeof parsed.reason === "string" ? parsed.reason : "";
   const normalizedDecision: AutoAcceptDecision = decisionRaw === "allow" ? "allow" : "review";
-  const normalizedReason =
-    decisionRaw === "block"
-      ? `Model requested block; falling back to manual review. ${reasonRaw || "No reason provided"}`
-      : (reasonRaw || "No reason provided");
+  const normalizedReason = normalizeAutoAcceptReason(reasonRaw, decisionRaw);
 
   return {
     result: {

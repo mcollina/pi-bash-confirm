@@ -5,6 +5,7 @@ import {
   AUTO_ACCEPT_MAX_TOKENS,
   AUTO_ACCEPT_SYSTEM_PROMPT,
   buildAutoAcceptPrompt,
+  parseAutoAcceptDecision,
 } from "../extensions/bash-confirm.ts";
 
 const cwd = "/workspace/project";
@@ -15,6 +16,23 @@ test("auto-accept reserves a generous reasoning and JSON output budget", () => {
 
 test("auto-accept instructs models to always respond in English", () => {
   assert.match(AUTO_ACCEPT_SYSTEM_PROMPT, /always respond in English/);
+  assert.match(buildAutoAcceptPrompt(cwd, "pwd", "strict"), /explanation in English using ASCII characters only/);
+});
+
+test("auto-accept replaces non-English reasons before displaying them", () => {
+  const allow = parseAutoAcceptDecision('{"decision":"allow","reason":"该命令是安全的"}');
+  const review = parseAutoAcceptDecision('{"decision":"review","reason":"This command 需要人工审核"}');
+  const block = parseAutoAcceptDecision('{"decision":"block","reason":"危险"}');
+
+  assert.equal(allow.result?.reason, "The command satisfies the auto-accept policy.");
+  assert.equal(review.result?.reason, "The command requires manual review under the auto-accept policy.");
+  assert.equal(block.result?.reason, "The model requested that this command be blocked; falling back to manual review.");
+});
+
+test("auto-accept preserves English reasons", () => {
+  const parsed = parseAutoAcceptDecision('{"decision":"allow","reason":"Runs a read-only status check."}');
+
+  assert.equal(parsed.result?.reason, "Runs a read-only status check.");
 });
 
 test("strict auto-accept ignores cd when applying policy scope", () => {
