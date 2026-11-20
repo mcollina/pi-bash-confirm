@@ -451,7 +451,7 @@ type AutoAcceptSessionOverride = "on" | "off";
 const bashConfirmSessionOverrides = new Map<string, BashConfirmSessionOverride>();
 const autoAcceptSessionOverrides = new Map<string, AutoAcceptSessionOverride>();
 const autoAcceptStrictnessSessionOverrides = new Map<string, AutoAcceptStrictness>();
-const additionalAllowedDirectoriesBySession = new Map<string, string[]>();
+const additionalAllowedDirectoriesBySession = new Map<string, Map<string, Set<string>>>();
 
 function getSessionOverrideKey(ctx: ExtensionContext): string {
   const sessionId = typeof ctx.sessionId === "string" && ctx.sessionId.trim()
@@ -496,18 +496,41 @@ function setAutoAcceptStrictnessSessionOverride(ctx: ExtensionContext, strictnes
 }
 
 function getAdditionalAllowedDirectories(ctx: ExtensionContext): string[] {
-  return additionalAllowedDirectoriesBySession.get(getSessionOverrideKey(ctx)) ?? [];
+  const allowed: string[] = [];
+  for (const [canonicalPath, aliases] of additionalAllowedDirectoriesBySession.get(getSessionOverrideKey(ctx)) ?? []) {
+    allowed.push(canonicalPath);
+    for (const alias of aliases) {
+      try {
+        // Keep the user's spelling only while it still points to the approved path.
+        if (realpathSync(alias) === canonicalPath) allowed.push(alias);
+      } catch {
+        // An alias that no longer resolves is not an allowed spelling.
+      }
+    }
+  }
+  return allowed;
 }
 
-function addAdditionalAllowedDirectory(ctx: ExtensionContext, directory: string): boolean {
+function addAdditionalAllowedDirectory(ctx: ExtensionContext, path: string, canonicalPath: string): boolean {
   const key = getSessionOverrideKey(ctx);
-  const current = additionalAllowedDirectoriesBySession.get(key) ?? [];
-  if (current.includes(directory)) return false;
-  additionalAllowedDirectoriesBySession.set(key, [...current, directory]);
+  let directories = additionalAllowedDirectoriesBySession.get(key);
+  if (!directories) {
+    directories = new Map();
+    additionalAllowedDirectoriesBySession.set(key, directories);
+  }
+
+  let aliases = directories.get(canonicalPath);
+  if (!aliases) {
+    aliases = new Set();
+    directories.set(canonicalPath, aliases);
+  } else if (path === canonicalPath || aliases.has(path)) {
+    return false;
+  }
+  if (path !== canonicalPath) aliases.add(path);
   return true;
 }
 
-function resolveAllowedDirectory(input: string, cwd: string): { directory?: string; error?: string } {
+function resolveAllowedDirectory(input: string, cwd: string): { path: string; canonicalPath: string } | { error: string } {
   const trimmed = input.trim();
   if (!trimmed) return { error: "Directory path is required" };
 
@@ -519,11 +542,11 @@ function resolveAllowedDirectory(input: string, cwd: string): { directory?: stri
   const absolute = resolve(cwd, expanded);
 
   try {
-    const directory = realpathSync(absolute);
-    if (!statSync(directory).isDirectory()) {
+    const canonicalPath = realpathSync(absolute);
+    if (!statSync(canonicalPath).isDirectory()) {
       return { error: `Not a directory: ${absolute}` };
     }
-    return { directory };
+    return { path: absolute, canonicalPath };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     return { error: `Cannot allow directory ${absolute}: ${message}` };
@@ -1666,16 +1689,17 @@ export default function (pi: ExtensionAPI) {
       }
 
       const resolved = resolveAllowedDirectory(requestedPath, ctx.cwd);
-      if (!resolved.directory) {
-        ctx.ui.notify(resolved.error ?? "Could not resolve directory", "error");
+      if ("error" in resolved) {
+        ctx.ui.notify(resolved.error, "error");
         return;
       }
 
-      const added = addAdditionalAllowedDirectory(ctx, resolved.directory);
+      const { path, canonicalPath } = resolved;
+      const added = addAdditionalAllowedDirectory(ctx, path, canonicalPath);
       ctx.ui.notify(
         added
-          ? `Allowed directory for this session: ${resolved.directory}`
-          : `Directory is already allowed for this session: ${resolved.directory}`,
+          ? `Allowed directory for this session: ${path}`
+          : `Directory is already allowed for this session: ${path}`,
         added ? "success" : "info",
       );
     },
